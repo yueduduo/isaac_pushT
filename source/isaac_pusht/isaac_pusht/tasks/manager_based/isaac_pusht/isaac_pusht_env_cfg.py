@@ -1,8 +1,3 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
 import math
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
@@ -130,7 +125,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False)
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.42, -0.15, 0.001)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.42, -0.15, -0.001)),
     )
 
 
