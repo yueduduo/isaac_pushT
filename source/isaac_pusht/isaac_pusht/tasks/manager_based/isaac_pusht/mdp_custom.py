@@ -8,19 +8,12 @@ import isaaclab.envs.mdp as mdp
 
 
 # obs func 
-
-def ee_frame_pos(env: ManagerBasedRLEnv, ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")) -> torch.Tensor:
-    from isaaclab.sensors import FrameTransformer
-    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    ee_frame_pos = ee_frame.data.target_pos_w[:, 0, :] - env.scene.env_origins[:, 0:3]
-
-    return ee_frame_pos
-def ee_frame_quat(env: ManagerBasedRLEnv, ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")) -> torch.Tensor:
-    from isaaclab.sensors import FrameTransformer
-    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    ee_frame_quat = ee_frame.data.target_quat_w[:, 0, :]
-
-    return ee_frame_quat
+def tcp_pose_w(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    # use FrameTransformer compute tcp. 提取出的数据形状是 (num_envs, num_target_frames, 3)
+    tcp_idx = -1
+    pos = env.scene[sensor_cfg.name].data.target_pos_w[:, tcp_idx, :]
+    quat = env.scene[sensor_cfg.name].data.target_quat_w[:, tcp_idx, :]
+    return torch.cat([pos, quat], dim=-1)
 
 
 # init func
@@ -67,7 +60,8 @@ def tee_distance_reward(env: ManagerBasedRLEnv, tee_cfg: SceneEntityCfg, goal_cf
     return ((1 - torch.tanh(5 * dist)) ** 2) / 2
 
 def tcp_proximity_reward(env: ManagerBasedRLEnv, tcp_cfg: SceneEntityCfg, tee_cfg: SceneEntityCfg) -> torch.Tensor:
-    tcp_pos = env.scene[tcp_cfg.name].data.root_pos_w
+    tcp_idx = -1
+    tcp_pos = env.scene[tcp_cfg.name].data.target_pos_w[:, tcp_idx, :] # 获取 TCP 位置
     tee_pos = env.scene[tee_cfg.name].data.root_pos_w
     dist = torch.linalg.norm(tee_pos - tcp_pos, dim=1)
     return ((1 - torch.tanh(5 * dist)).sqrt()) / 20

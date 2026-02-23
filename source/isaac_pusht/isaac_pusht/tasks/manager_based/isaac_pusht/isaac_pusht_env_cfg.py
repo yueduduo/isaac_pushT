@@ -78,13 +78,49 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
     )
 
     robot: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot") # use the high stiffness version of the panda config to make the pushing more stable
-    
+
+    push_stick = AssetBaseCfg(
+        # 把圆柱体生成为机械臂末端连杆（panda_hand）的子节点，物理引擎会自动把它当成机械臂末端的一部分，带着它一起运动，并且一起计算碰撞！
+        # 路径写在 panda_hand 之下，它就天然变成了手的一部分
+        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/stick_geometry",
+        spawn=sim_utils.CylinderCfg(
+            radius=0.009,       # 圆柱的半径 
+            height=0.25,       # 圆柱的长度
+            axis="Z",          # 圆柱朝向 Z 轴
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.9, 0.9)), # 白色推杆
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True # 必须开启碰撞，否则推不动方块
+            ),
+            
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            # 注意：这是相对于 panda_hand 的【局部坐标偏移】
+            # 因为夹爪本身有一定长度，我们需要顺着 Z 轴往下移一点，让它伸出来
+            pos=(0.0, 0.0, 0.10), 
+        ),
+    )
+    tcp_ball = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/stick_geometry/tcp_ball",
+        spawn=sim_utils.SphereCfg(
+            radius=0.015,       
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.1, 0.1)), 
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True 
+            ),
+            
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            # 因为圆柱本身有一定长度，我们需要顺着 Z 轴往下移一点，让它伸出来
+            pos=(0.0, 0.0, 0.125), 
+        ),
+    )
+
     t_block: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TBlock",
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{BASE_DIR}/assets/t_block.usd",
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.45, 0.12, 0.05)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.12, 0.05)),
     )
     
     goal_tee: RigidObjectCfg = RigidObjectCfg(
@@ -94,7 +130,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False)
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.35, -0.15, 0.001)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.42, -0.15, 0.001)),
     )
 
 
@@ -113,8 +149,10 @@ class ObservationsCfg:
         goal_pos = ObsTerm(func=mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("goal_tee")})
 
         # 机械臂tcp末端位姿 
-        eef_pos = ObsTerm(func=ee_frame_pos)
-        eef_quat = ObsTerm(func=ee_frame_quat)
+        tcp_pose = ObsTerm(
+            func=mdp_custom.tcp_pose_w, 
+            params={"sensor_cfg": SceneEntityCfg("tfs")}
+        )
 
         actions = ObsTerm(func=mdp.last_action)
         
@@ -129,6 +167,12 @@ class ObservationsCfg:
 class ActionsCfg:
     """定义动作空间：由于是 PushT，使用末端执行器 (EE) 空间控制最合适"""
     # Set actions for the specific robot franka 
+
+    '''
+    动作空间保持控制 panda_hand 即可。因为推杆是被死死固定在 panda_hand 上的。
+    * 对于平移 (X, Y, Z)：当网络想要让 TCP 向左移动 1 厘米时，它只要输出让 panda_hand 向左移动 1 厘米的指令，TCP 就会完美地跟着向左移动 1 厘米（完全等效）。
+    * 策略网络的自适应：只要 ObservationsCfg 里喂给神经网络的是 TCP 的真实坐标（而不是手腕坐标），PPO 算法会自然而然地把末端推杆当成自己的“手”，学习出完美的映射。这是强化学习最擅长解决的问题
+    '''
     arm_action = DifferentialInverseKinematicsActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
@@ -152,7 +196,10 @@ class RewardsCfg:
     tcp_prox_reward = RewTerm(
         func=mdp_custom.tcp_proximity_reward,
         weight=1.0,
-        params={"tcp_cfg": SceneEntityCfg("robot", body_names="panda_hand"), "tee_cfg": SceneEntityCfg("t_block")}
+        params={
+            "tcp_cfg": SceneEntityCfg("tfs"), # 指向tf传感器！
+            "tee_cfg": SceneEntityCfg("t_block")
+        }
     )
 
     dist_reward = RewTerm(
@@ -225,8 +272,6 @@ class TerminationsCfg:
 ##
 # Environment configuration
 ##
-
-
 @configclass
 class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
@@ -259,30 +304,39 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
         marker_cfg = FRAME_MARKER_CFG.copy()
         marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
-        self.scene.ee_frame = FrameTransformerCfg(
+        self.scene.tfs = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
-            debug_vis=False,
+            debug_vis=True,
             visualizer_cfg=marker_cfg,
             target_frames=[
+                # FrameTransformerCfg.FrameCfg(
+                #     prim_path="{ENV_REGEX_NS}/Robot/panda_hand",
+                #     name="end_effector",
+                #     offset=OffsetCfg(
+                #         pos=[0.0, 0.0, 0.1034],
+                #     ),
+                # ),
+                # FrameTransformerCfg.FrameCfg(
+                #     prim_path="{ENV_REGEX_NS}/Robot/panda_rightfinger",
+                #     name="tool_rightfinger",
+                #     offset=OffsetCfg(
+                #         pos=(0.0, 0.0, 0.046),
+                #     ),
+                # ),
+                # FrameTransformerCfg.FrameCfg(
+                #     prim_path="{ENV_REGEX_NS}/Robot/panda_leftfinger",
+                #     name="tool_leftfinger",
+                #     offset=OffsetCfg(
+                #         pos=(0.0, 0.0, 0.046),
+                #     ),
+                # ),
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/panda_hand",
-                    name="end_effector",
+                    prim_path="{ENV_REGEX_NS}/Robot/panda_hand", # 挂载在 panda_hand 上
+                    name="tcp",
                     offset=OffsetCfg(
-                        pos=[0.0, 0.0, 0.1034],
-                    ),
-                ),
-                FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/panda_rightfinger",
-                    name="tool_rightfinger",
-                    offset=OffsetCfg(
-                        pos=(0.0, 0.0, 0.046),
-                    ),
-                ),
-                FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/panda_leftfinger",
-                    name="tool_leftfinger",
-                    offset=OffsetCfg(
-                        pos=(0.0, 0.0, 0.046),
+                        # 核心：根据你推杆的长度进行偏移！
+                        # stick 中心在 Z=0.10，总长 0.25，所以尖端在 0.10 + 0.125 = 0.225
+                        pos=(0.0, 0.0, 0.225), 
                     ),
                 ),
             ],
