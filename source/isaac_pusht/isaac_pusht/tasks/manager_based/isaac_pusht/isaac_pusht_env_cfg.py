@@ -1,4 +1,6 @@
 import math
+import torch
+import numpy as np
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -10,6 +12,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
+import isaaclab.utils.math as math_utils
 import math
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
@@ -27,7 +30,7 @@ sys.path.append(BASE_DIR)
 import mdp_custom 
 from mdp_custom import *
 
-from isaaclab.sensors import FrameTransformerCfg
+from isaaclab.sensors import FrameTransformerCfg, TiledCameraCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
@@ -71,6 +74,18 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0], rot=[0.707, 0, 0, 0.707]),
         spawn=UsdFileCfg(usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"),
     )
+    # 工作区
+    workspace = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Workspace",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.4, 0.5, 0.001), # 一层布
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.3, 0.3, 0.3)), # 灰色
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False), # 不参与碰撞，避免干扰
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.5, 0.0, -0.0015), 
+        ),
+    )
 
     robot: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot") # use the high stiffness version of the panda config to make the pushing more stable
 
@@ -79,7 +94,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         # 路径写在 panda_hand 之下，它就天然变成了手的一部分
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/stick_geometry",
         spawn=sim_utils.CylinderCfg(
-            radius=0.009,       # 圆柱的半径 
+            radius=0.005,       # 圆柱的半径 
             height=0.25,       # 圆柱的长度
             axis="Z",          # 圆柱朝向 Z 轴
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.9, 0.9)), # 白色推杆
@@ -97,8 +112,8 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
     tcp_ball = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/stick_geometry/tcp_ball",
         spawn=sim_utils.SphereCfg(
-            radius=0.015,       
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.1, 0.1)), 
+            radius=0.007,       
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.01, 0.01, 0.01)), 
             collision_props=sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True 
             ),
@@ -115,7 +130,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{BASE_DIR}/assets/t_block.usd",
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.12, 0.05)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0, 0.05)),
     )
     
     goal_tee: RigidObjectCfg = RigidObjectCfg(
@@ -125,8 +140,99 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False)
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.42, -0.15, -0.001)),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5, 0, -0.001),
+            # math_utils.quat_from_euler_xyz 期望 Tensor 输入，并返回 [W, X, Y, Z] 格式
+            rot=math_utils.quat_from_euler_xyz(
+                torch.tensor([0.0]), 
+                torch.tensor([0.0]), 
+                torch.tensor([-45.0 * math.pi / 180.0])
+            )[0].tolist()
+        ),
     )
+
+    # Wrist-mounted camera (跟随机器人末端)
+    front_wrirst_camera = TiledCameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/front_wrirst_camera",
+        # 放置在手部的斜上方并稍微靠后 (X轴负方向为后，Z轴正方向为上)
+        # 坐标系与 panda_hand 完全对齐，不带旋转
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.05, 0.0, 0), 
+            rot=math_utils.quat_from_euler_xyz(
+                torch.tensor([0.0]), 
+                torch.tensor([0.0]), 
+                torch.tensor([90 * math.pi / 180.0])
+            )[0].tolist()
+        ),
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, vertical_aperture=15.2908, clipping_range=(0.1, 1.0e5)
+        ),
+        width=224,
+        height=224,
+        data_types=["rgb"],
+        update_period=0,
+    )
+
+    # 相机视觉标记 (创建一个红色小方块，挂载在相同位置，用于在场景中直观看到相机)
+    front_wrirst_camera_visual = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/front_wrirst_camera_visual",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.08, 0.04, 0.04), # 4cm 的小方块
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)), # 鲜红色
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False), # 不参与碰撞，避免干扰
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.05, 0.0, 0), 
+            rot=math_utils.quat_from_euler_xyz(
+                torch.tensor([0.0]), 
+                torch.tensor([0.0]), 
+                torch.tensor([-90 * math.pi / 180.0])
+            )[0].tolist() # 与相机保持一致
+        ),
+    )
+
+    back_wrirst_camera = TiledCameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/back_wrirst_camera",
+        # 放置在手部的斜上方并稍微靠后 (X轴负方向为后，Z轴正方向为上)
+        # 坐标系与 panda_hand 完全对齐，不带旋转
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(-0.05, 0.0, 0), 
+            rot=math_utils.quat_from_euler_xyz(
+                torch.tensor([0.0]), 
+                torch.tensor([0.0]), 
+                torch.tensor([90 * math.pi / 180.0])
+            )[0].tolist()
+        ),
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, vertical_aperture=15.2908, clipping_range=(0.1, 1.0e5)
+        ),
+        width=224,
+        height=224,
+        data_types=["rgb"],
+        update_period=0,
+    )
+
+    # 相机视觉标记 (创建一个红色小方块，挂载在相同位置，用于在场景中直观看到相机)
+    back_wrirst_camera_visual = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/back_wrirst_camera_visual",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.08, 0.04, 0.04), # 4cm 的小方块
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)), # 鲜红色
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False), # 不参与碰撞，避免干扰
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(-0.05, 0.0, 0), 
+            rot=math_utils.quat_from_euler_xyz(
+                torch.tensor([0.0]), 
+                torch.tensor([0.0]), 
+                torch.tensor([-90 * math.pi / 180.0])
+            )[0].tolist() # 与相机保持一致
+        ),
+    )
+
+
+
+    
 
 
 ##
@@ -163,18 +269,18 @@ class ActionsCfg:
     """定义动作空间：由于是 PushT，使用末端执行器 (EE) 空间控制最合适"""
     # Set actions for the specific robot franka 
 
-    '''
-    动作空间保持控制 panda_hand 即可。因为推杆是被死死固定在 panda_hand 上的。
-    * 对于平移 (X, Y, Z)：当网络想要让 TCP 向左移动 1 厘米时，它只要输出让 panda_hand 向左移动 1 厘米的指令，TCP 就会完美地跟着向左移动 1 厘米（完全等效）。
-    * 策略网络的自适应：只要 ObservationsCfg 里喂给神经网络的是 TCP 的真实坐标（而不是手腕坐标），PPO 算法会自然而然地把末端推杆当成自己的“手”，学习出完美的映射。这是强化学习最擅长解决的问题
-    '''
     arm_action = DifferentialInverseKinematicsActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
-        body_name="panda_hand",
-        controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
-        scale=0.5,
-        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.107]),
+        body_name="panda_hand", # 必须使用机器人原生的连杆名称
+        controller=DifferentialIKControllerCfg(
+            command_type="pose", 
+            use_relative_mode=True, 
+            ik_method="dls",
+        ),
+        scale=0.1, # 降低缩放 (从 0.5 降到 0.1)，防止单步位移过大导致 IK 崩溃
+        # 通过offset 将控制中心放置在 tcp_ball 的位置 (0.10 + 0.125 = 0.225)
+        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.225]),
     )
 
     gripper_action = mdp.BinaryJointPositionActionCfg(
@@ -221,7 +327,7 @@ class EventCfg:
         mode="reset",
         params={
             "mean": 0.0,
-            "std": 0.02,
+            "std": 0.00,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
@@ -233,7 +339,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("t_block"),
             "pose_range": {
                 "x": (-0.1, 0.1), 
-                "y": (-0.1, 0.2), 
+                "y": (-0.1, 0.1), 
                 "yaw": (0.0, 2 * math.pi),
                 # 其他坐标轴（比如 z, roll, pitch）将默认保持初始状态
             }, 
@@ -292,7 +398,7 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings
-        self.sim.dt = 1 / 100
+        self.sim.dt = 1 / 50
         self.sim.render_interval = self.decimation
 
         # [vis] create adjusted frame transformer config for visualizing the end-effector pose in the scene
@@ -301,7 +407,7 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
         self.scene.tfs = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
-            debug_vis=True,
+            debug_vis=False,
             visualizer_cfg=marker_cfg,
             target_frames=[
                 # FrameTransformerCfg.FrameCfg(
@@ -340,24 +446,24 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
         # [teleop] set up teleoperation devices and retargeters
         self.teleop_devices = DevicesCfg(
             devices={
-                "handtracking": OpenXRDeviceCfg(
-                    retargeters=[
-                        Se3RelRetargeterCfg(
-                            bound_hand=DeviceBase.TrackingTarget.HAND_RIGHT,
-                            zero_out_xy_rotation=True,
-                            use_wrist_rotation=False,
-                            use_wrist_position=True,
-                            delta_pos_scale_factor=10.0,
-                            delta_rot_scale_factor=10.0,
-                            sim_device=self.sim.device,
-                        ),
-                        GripperRetargeterCfg(
-                            bound_hand=DeviceBase.TrackingTarget.HAND_RIGHT, sim_device=self.sim.device
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
+                # "handtracking": OpenXRDeviceCfg(
+                #     retargeters=[
+                #         Se3RelRetargeterCfg(
+                #             bound_hand=DeviceBase.TrackingTarget.HAND_RIGHT,
+                #             zero_out_xy_rotation=True,
+                #             use_wrist_rotation=False,
+                #             use_wrist_position=True,
+                #             delta_pos_scale_factor=10.0,
+                #             delta_rot_scale_factor=10.0,
+                #             sim_device=self.sim.device,
+                #         ),
+                #         GripperRetargeterCfg(
+                #             bound_hand=DeviceBase.TrackingTarget.HAND_RIGHT, sim_device=self.sim.device
+                #         ),
+                #     ],
+                #     sim_device=self.sim.device,
+                #     xr_cfg=self.xr,
+                # ),
                 "keyboard": Se3KeyboardCfg(
                     pos_sensitivity=0.05,
                     rot_sensitivity=0.05,
