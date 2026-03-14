@@ -52,3 +52,24 @@ This repository contains the code for the Isaac-Pusht-v0 task.
             ```bash
             python scripts/random_agent.py --task=Isaac-Pusht-v0 
             ```
+
+## Data Collection and Visualization
+
+This project supports data collection and visualization using the LeRobot v3.0 format.
+
+### 1. Data Collection
+
+Run the following command to start collecting data (including camera observations):
+
+```bash
+python isaac_pushT/scripts/record_lerobot.py --task Isaac-Pusht-v0 --num_episodes 200 --enable_cameras
+```
+
+### 2. Data Visualization
+
+After collection is complete, you can use the `lerobot` visualization tool to view the data:
+
+```bash
+python -m lerobot.scripts.lerobot_dataset_viz --repo-id isaac_pusht --root data/isaac_pusht --episode-index 0
+```
+

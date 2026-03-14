@@ -1,52 +1,97 @@
 import math
+import os
+import sys
+
 import torch
 import numpy as np
+
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+import isaaclab.envs.mdp as mdp
+import isaaclab.utils.math as math_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.devices.device_base import DeviceBase, DevicesCfg
+from isaaclab.devices.keyboard import Se3KeyboardCfg
+from isaaclab.devices.openxr import XrCfg
+from isaaclab.devices.openxr.openxr_device import OpenXRDeviceCfg
+from isaaclab.devices.openxr.retargeters.manipulator.gripper_retargeter import GripperRetargeterCfg
+from isaaclab.devices.openxr.retargeters.manipulator.se3_rel_retargeter import Se3RelRetargeterCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import FrameTransformerCfg, TiledCameraCfg
+from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
-import isaaclab.utils.math as math_utils
-import math
-import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import RewardTermCfg, TerminationTermCfg, SceneEntityCfg
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.utils import configclass
-from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-import isaaclab.envs.mdp as mdp
-import sys
-import os
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
+
+# 导入自定义 MDP
 BASE_DIR = os.path.dirname(__file__)
 sys.path.append(BASE_DIR)
-import mdp_custom 
+import mdp_custom
 from mdp_custom import *
 
-from isaaclab.sensors import FrameTransformerCfg, TiledCameraCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-
-from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
-from isaaclab.devices.openxr import XrCfg
-from isaaclab.devices.device_base import DeviceBase, DevicesCfg
-from isaaclab.devices.keyboard import Se3KeyboardCfg
-from isaaclab.devices.openxr.openxr_device import OpenXRDeviceCfg
-from isaaclab.devices.openxr.retargeters.manipulator.gripper_retargeter import GripperRetargeterCfg
-from isaaclab.devices.openxr.retargeters.manipulator.se3_rel_retargeter import Se3RelRetargeterCfg
-
 ##
-# Pre-defined configs
+# Constants - 重要参数提取
 ##
-from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG  # isort: skip 
-from isaaclab.markers.config import FRAME_MARKER_CFG  # isort: skip
+
+# 场景布局
+GROUND_POS = [0, 0, -1.05]
+TABLE_POS = [0.5, 0, 0]
+TABLE_ROT = [0.707, 0, 0, 0.707]
+WORKSPACE_SIZE = (0.4, 0.5, 0.001)
+WORKSPACE_POS = (0.5, 0.0, -0.0015)
+
+# 机器人推杆 (Push Stick) 参数
+STICK_RADIUS = 0.005
+STICK_HEIGHT = 0.25
+STICK_OFFSET_Z = 0.10  # 相对于 panda_hand 的局部偏移
+TCP_BALL_RADIUS = 0.007
+TCP_BALL_OFFSET_Z = 0.125  # 相对于 stick_geometry 的局部偏移
+# 控制中心 (TCP) 偏移量：STICK_OFFSET_Z + TCP_BALL_OFFSET_Z
+TCP_OFFSET_Z = 0.225 
+
+# 任务物体 (T-Block)
+T_BLOCK_POS = (0.5, 0, 0.05)
+
+T_BLOCK_RANDOM_X = (-0.1, 0.1)
+T_BLOCK_RANDOM_Y = (-0.1, 0.1)
+
+# 目标区域 (Goal Tee)
+GOAL_TEE_POS = (0.5, 0, -0.001)
+GOAL_TEE_YAW = -45.0
+GOAL_TEE_ROT = math_utils.quat_from_euler_xyz(
+    torch.tensor([0.0]), 
+    torch.tensor([0.0]), 
+    torch.tensor([GOAL_TEE_YAW * math.pi / 180.0])
+)[0].tolist()
+
+# 机器人控制与状态
+DEFAULT_JOINT_POSE = [0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952, 0., 0.]
+IK_CONTROL_SCALE = 0.1
+
+# 相机配置
+CAMERA_WIDTH = 224
+CAMERA_HEIGHT = 224
+
+CAMERA_YAW_DEG = 90.0
+
+FRONT_WRIST_CAMERA_POS = (0.05, 0.0, 0)
+FRONT_WRIST_CAMERA_ROT = math_utils.quat_from_euler_xyz(
+                torch.tensor([0.0]), 
+                torch.tensor([0.0]), 
+                torch.tensor([CAMERA_YAW_DEG * math.pi / 180.0])
+            )[0].tolist()
+
+BACK_WRIST_CAMERA_POS = (-0.05, 0.0, 0)
 
 ##
 # Scene definition
@@ -58,7 +103,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
     # ground plane
     ground = AssetBaseCfg(
         prim_path="/World/GroundPlane",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, -1.05]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=GROUND_POS),
         spawn=GroundPlaneCfg(),
     )
 
@@ -71,19 +116,19 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
     # Table
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0], rot=[0.707, 0, 0, 0.707]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=TABLE_POS, rot=TABLE_ROT),
         spawn=UsdFileCfg(usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"),
     )
     # 工作区
     workspace = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Workspace",
         spawn=sim_utils.CuboidCfg(
-            size=(0.4, 0.5, 0.001), # 一层布
+            size=WORKSPACE_SIZE, 
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.3, 0.3, 0.3)), # 灰色
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False), # 不参与碰撞，避免干扰
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False), # 不参与碰撞
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.5, 0.0, -0.0015), 
+            pos=WORKSPACE_POS, 
         ),
     )
 
@@ -94,34 +139,25 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         # 路径写在 panda_hand 之下，它就天然变成了手的一部分
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/stick_geometry",
         spawn=sim_utils.CylinderCfg(
-            radius=0.005,       # 圆柱的半径 
-            height=0.25,       # 圆柱的长度
-            axis="Z",          # 圆柱朝向 Z 轴
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.9, 0.9)), # 白色推杆
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True # 必须开启碰撞，否则推不动方块
-            ),
-            
+            radius=STICK_RADIUS,
+            height=STICK_HEIGHT,
+            axis="Z",
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.9, 0.9)),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            # 注意：这是相对于 panda_hand 的【局部坐标偏移】
-            # 因为夹爪本身有一定长度，我们需要顺着 Z 轴往下移一点，让它伸出来
-            pos=(0.0, 0.0, 0.10), 
+            pos=(0.0, 0.0, STICK_OFFSET_Z), 
         ),
     )
     tcp_ball = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/stick_geometry/tcp_ball",
         spawn=sim_utils.SphereCfg(
-            radius=0.007,       
+            radius=TCP_BALL_RADIUS,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.01, 0.01, 0.01)), 
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True 
-            ),
-            
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            # 因为圆柱本身有一定长度，我们需要顺着 Z 轴往下移一点，让它伸出来
-            pos=(0.0, 0.0, 0.125), 
+            pos=(0.0, 0.0, TCP_BALL_OFFSET_Z), 
         ),
     )
 
@@ -130,7 +166,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{BASE_DIR}/assets/t_block.usd",
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0, 0.05)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=T_BLOCK_POS),
     )
     
     goal_tee: RigidObjectCfg = RigidObjectCfg(
@@ -141,98 +177,67 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False)
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.5, 0, -0.001),
-            # math_utils.quat_from_euler_xyz 期望 Tensor 输入，并返回 [W, X, Y, Z] 格式
-            rot=math_utils.quat_from_euler_xyz(
-                torch.tensor([0.0]), 
-                torch.tensor([0.0]), 
-                torch.tensor([-45.0 * math.pi / 180.0])
-            )[0].tolist()
+            pos=GOAL_TEE_POS,
+            rot=GOAL_TEE_ROT
         ),
     )
 
-    # Wrist-mounted camera (跟随机器人末端)
+    # Wrist-mounted camera
     front_wrirst_camera = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/front_wrirst_camera",
-        # 放置在手部的斜上方并稍微靠后 (X轴负方向为后，Z轴正方向为上)
-        # 坐标系与 panda_hand 完全对齐，不带旋转
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.05, 0.0, 0), 
-            rot=math_utils.quat_from_euler_xyz(
-                torch.tensor([0.0]), 
-                torch.tensor([0.0]), 
-                torch.tensor([90 * math.pi / 180.0])
-            )[0].tolist()
+            pos=FRONT_WRIST_CAMERA_POS, 
+            rot=FRONT_WRIST_CAMERA_ROT
         ),
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, vertical_aperture=15.2908, clipping_range=(0.1, 1.0e5)
         ),
-        width=224,
-        height=224,
+        width=CAMERA_WIDTH,
+        height=CAMERA_HEIGHT,
         data_types=["rgb"],
         update_period=0,
     )
 
-    # 相机视觉标记 (创建一个红色小方块，挂载在相同位置，用于在场景中直观看到相机)
     front_wrirst_camera_visual = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/front_wrirst_camera_visual",
         spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.04, 0.04), # 4cm 的小方块
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)), # 鲜红色
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False), # 不参与碰撞，避免干扰
+            size=(0.08, 0.04, 0.04),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.05, 0.0, 0), 
-            rot=math_utils.quat_from_euler_xyz(
-                torch.tensor([0.0]), 
-                torch.tensor([0.0]), 
-                torch.tensor([-90 * math.pi / 180.0])
-            )[0].tolist() # 与相机保持一致
+            pos=FRONT_WRIST_CAMERA_POS, 
+            rot=FRONT_WRIST_CAMERA_ROT
         ),
     )
 
     back_wrirst_camera = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/back_wrirst_camera",
-        # 放置在手部的斜上方并稍微靠后 (X轴负方向为后，Z轴正方向为上)
-        # 坐标系与 panda_hand 完全对齐，不带旋转
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(-0.05, 0.0, 0), 
-            rot=math_utils.quat_from_euler_xyz(
-                torch.tensor([0.0]), 
-                torch.tensor([0.0]), 
-                torch.tensor([90 * math.pi / 180.0])
-            )[0].tolist()
+            pos=BACK_WRIST_CAMERA_POS, 
+            rot=FRONT_WRIST_CAMERA_ROT
         ),
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, vertical_aperture=15.2908, clipping_range=(0.1, 1.0e5)
         ),
-        width=224,
-        height=224,
+        width=CAMERA_WIDTH,
+        height=CAMERA_HEIGHT,
         data_types=["rgb"],
         update_period=0,
     )
 
-    # 相机视觉标记 (创建一个红色小方块，挂载在相同位置，用于在场景中直观看到相机)
     back_wrirst_camera_visual = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/back_wrirst_camera_visual",
         spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.04, 0.04), # 4cm 的小方块
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)), # 鲜红色
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False), # 不参与碰撞，避免干扰
+            size=(0.08, 0.04, 0.04),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(-0.05, 0.0, 0), 
-            rot=math_utils.quat_from_euler_xyz(
-                torch.tensor([0.0]), 
-                torch.tensor([0.0]), 
-                torch.tensor([-90 * math.pi / 180.0])
-            )[0].tolist() # 与相机保持一致
+            pos=BACK_WRIST_CAMERA_POS, 
+            rot=FRONT_WRIST_CAMERA_ROT
         ),
     )
-
-
-
-    
 
 
 ##
@@ -278,9 +283,9 @@ class ActionsCfg:
             use_relative_mode=True, 
             ik_method="dls",
         ),
-        scale=0.1, # 降低缩放 (从 0.5 降到 0.1)，防止单步位移过大导致 IK 崩溃
+        scale=IK_CONTROL_SCALE, # 降低缩放 (从 0.5 降到 0.1)，防止单步位移过大导致 IK 崩溃
         # 通过offset 将控制中心放置在 tcp_ball 的位置 (0.10 + 0.125 = 0.225)
-        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.225]),
+        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, TCP_OFFSET_Z]),
     )
 
     gripper_action = mdp.BinaryJointPositionActionCfg(
@@ -318,7 +323,7 @@ class EventCfg:
         func=mdp_custom.set_default_joint_pose,
         mode="reset",
         params={
-            "default_pose": [0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952, 0., 0.],
+            "default_pose": DEFAULT_JOINT_POSE,
         },
     )
     
@@ -338,8 +343,8 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("t_block"),
             "pose_range": {
-                "x": (-0.1, 0.1), 
-                "y": (-0.1, 0.1), 
+                "x": T_BLOCK_RANDOM_X, 
+                "y": T_BLOCK_RANDOM_Y, 
                 "yaw": (0.0, 2 * math.pi),
                 # 其他坐标轴（比如 z, roll, pitch）将默认保持初始状态
             }, 
@@ -382,8 +387,8 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
     # MDP settings
-    rewards: RewardTermCfg = RewardsCfg()
-    terminations: TerminationTermCfg = TerminationsCfg()
+    rewards: RewTerm = RewardsCfg()
+    terminations: DoneTerm = TerminationsCfg()
     xr: XrCfg = XrCfg(
         anchor_pos=(-0.1, -0.5, -1.05),
         anchor_rot=(0.866, 0, 0, -0.5),
@@ -396,7 +401,7 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 2
         self.episode_length_s = 5
         # viewer settings
-        self.viewer.eye = (8.0, 0.0, 5.0)
+        self.viewer.eye = (4.0, 0.0, 2.0)
         # simulation settings
         self.sim.dt = 1 / 50
         self.sim.render_interval = self.decimation
@@ -435,9 +440,7 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
                     prim_path="{ENV_REGEX_NS}/Robot/panda_hand", # 挂载在 panda_hand 上
                     name="tcp",
                     offset=OffsetCfg(
-                        # 核心：根据你推杆的长度进行偏移！
-                        # stick 中心在 Z=0.10，总长 0.25，所以尖端在 0.10 + 0.125 = 0.225
-                        pos=(0.0, 0.0, 0.225), 
+                        pos=(0.0, 0.0, TCP_OFFSET_Z), 
                     ),
                 ),
             ],
