@@ -37,29 +37,27 @@ class DiffusionTrainer:
         self.alpha_bars = alpha_bars
 
     def _move_obs(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return {k: v.to(self.device, non_blocking=True) for k, v in obs.items()}
+        # 此时 obs 已经在 collate_fn 中搬运到了 GPU
+        return obs
 
     @staticmethod
     def _flatten_action(action: torch.Tensor) -> torch.Tensor:
         if action.dim() <= 2:
             return action
-        return action.reshape(action.shape[0], -1)
+        return action.flatten(1)
 
     def train_epoch(self, dataloader: torch.utils.data.DataLoader) -> float:
         self.model.train()
         losses: list[float] = []
         
-        # [诊断] 第一个 batch 的获取涉及数据 Shuffle 和子进程初始化
-        tqdm.write("  --> Starting DataLoader iterator...")
-        pbar = tqdm(dataloader, desc="  Training", leave=False)
+        pbar = tqdm(dataloader, desc="  Training", leave=False, mininterval=1.0)
         for i, batch in enumerate(pbar):
             if i == 0:
-                # 触发首次 GPU 操作以确认 CUDA 是否可用
                 torch.cuda.synchronize()
-                tqdm.write("  --> CUDA initialized and first batch ready.")
             
             obs = self._move_obs(batch["obs"])
-            action = batch["action"].to(self.device, non_blocking=True)
+            # action 也已经在 collate_fn 中搬运到了 GPU
+            action = batch["action"]
             action = self._flatten_action(action)
             bsz = action.shape[0]
 

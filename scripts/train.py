@@ -57,12 +57,12 @@ def evaluate_diffusion(policy: DiffusionPolicy, dataloader: torch.utils.data.Dat
     trainer = policy.trainer
     model.eval()
     losses = []
-    pbar = tqdm(dataloader, desc="  Validating", leave=False)
+    pbar = tqdm(dataloader, desc="  Validating", leave=False, mininterval=1.0)
     for batch in pbar:
-        obs = {k: v.to(policy.device) for k, v in batch["obs"].items()}
-        action = batch["action"].to(policy.device)
+        obs = batch["obs"]
+        action = batch["action"]
         if action.dim() > 2:
-            action = action.reshape(action.shape[0], -1)
+            action = action.flatten(1)
         bsz = action.shape[0]
         t = torch.randint(0, trainer.config.num_diffusion_steps, (bsz,), device=policy.device)
         noise = torch.randn_like(action)
@@ -81,12 +81,12 @@ def evaluate_flow(policy: FlowMappingPolicy, dataloader: torch.utils.data.DataLo
     model = policy.trainer.model
     model.eval()
     losses = []
-    pbar = tqdm(dataloader, desc="  Validating", leave=False)
+    pbar = tqdm(dataloader, desc="  Validating", leave=False, mininterval=1.0)
     for batch in pbar:
-        obs = {k: v.to(policy.device) for k, v in batch["obs"].items()}
-        action = batch["action"].to(policy.device)
+        obs = batch["obs"]
+        action = batch["action"]
         if action.dim() > 2:
-            action = action.reshape(action.shape[0], -1)
+            action = action.flatten(1)
         x0 = torch.randn_like(action)
         t = torch.rand(action.shape[0], device=policy.device)
         x_t = (1.0 - t.unsqueeze(-1)) * x0 + t.unsqueeze(-1) * action
@@ -109,6 +109,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         train_ratio=0.95,
+        device=device,
     )
 
     # [优化] 直接从数据集对象获取维度，彻底移除 Subset 影响

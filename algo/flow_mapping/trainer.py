@@ -28,26 +28,25 @@ class FlowMappingTrainer:
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config.lr, weight_decay=1e-4)
 
     def _move_obs(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return {k: v.to(self.device, non_blocking=True) for k, v in obs.items()}
+        return obs
 
     @staticmethod
     def _flatten_action(action: torch.Tensor) -> torch.Tensor:
         if action.dim() <= 2:
             return action
-        return action.reshape(action.shape[0], -1)
+        return action.flatten(1)
 
     def train_epoch(self, dataloader: torch.utils.data.DataLoader) -> float:
         self.model.train()
         losses: list[float] = []
         
-        # [诊断] 第一个 batch 的获取往往涉及数据 Shuffle 和 CUDA 初始化
-        pbar = tqdm(dataloader, desc="  Training", leave=False)
+        pbar = tqdm(dataloader, desc="  Training", leave=False, mininterval=1.0)
         for i, batch in enumerate(pbar):
             if i == 0:
                 torch.cuda.synchronize()
             
             obs = self._move_obs(batch["obs"])
-            action = batch["action"].to(self.device, non_blocking=True)
+            action = batch["action"]
             action = self._flatten_action(action)
 
             x0 = torch.randn_like(action)
