@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from  algo.flow_mapping.model import FlowMappingTransformerModel
 
@@ -38,7 +39,13 @@ class FlowMappingTrainer:
     def train_epoch(self, dataloader: torch.utils.data.DataLoader) -> float:
         self.model.train()
         losses: list[float] = []
-        for batch in dataloader:
+        
+        # [诊断] 第一个 batch 的获取往往涉及数据 Shuffle 和 CUDA 初始化
+        pbar = tqdm(dataloader, desc="  Training", leave=False)
+        for i, batch in enumerate(pbar):
+            if i == 0:
+                torch.cuda.synchronize()
+            
             obs = self._move_obs(batch["obs"])
             action = batch["action"].to(self.device, non_blocking=True)
             action = self._flatten_action(action)
@@ -56,7 +63,11 @@ class FlowMappingTrainer:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
             self.optimizer.step()
-            losses.append(loss.item())
+            
+            loss_val = loss.item()
+            losses.append(loss_val)
+            pbar.set_postfix(loss=f"{loss_val:.4f}")
+            
         return float(sum(losses) / max(len(losses), 1))
 
     @torch.no_grad()

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from algo.diffusion.model import DiffusionTransformerModel
 
@@ -47,7 +48,16 @@ class DiffusionTrainer:
     def train_epoch(self, dataloader: torch.utils.data.DataLoader) -> float:
         self.model.train()
         losses: list[float] = []
-        for batch in dataloader:
+        
+        # [诊断] 第一个 batch 的获取涉及数据 Shuffle 和子进程初始化
+        tqdm.write("  --> Starting DataLoader iterator...")
+        pbar = tqdm(dataloader, desc="  Training", leave=False)
+        for i, batch in enumerate(pbar):
+            if i == 0:
+                # 触发首次 GPU 操作以确认 CUDA 是否可用
+                torch.cuda.synchronize()
+                tqdm.write("  --> CUDA initialized and first batch ready.")
+            
             obs = self._move_obs(batch["obs"])
             action = batch["action"].to(self.device, non_blocking=True)
             action = self._flatten_action(action)
@@ -65,7 +75,10 @@ class DiffusionTrainer:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
             self.optimizer.step()
-            losses.append(loss.item())
+            
+            loss_val = loss.item()
+            losses.append(loss_val)
+            pbar.set_postfix(loss=f"{loss_val:.4f}")
 
         return float(sum(losses) / max(len(losses), 1))
 
