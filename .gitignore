@@ -75,3 +75,5 @@ tests/
 **/gelsight_r15_data/*
 !**/goal_tee.usd
 !**/t_block.usd
+
+data/

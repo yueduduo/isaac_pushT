@@ -4,7 +4,7 @@
 
 This repository contains the code for the Isaac-Pusht-v0 task.
 <div style="display: flex; justify-content: center;">
-  <img src="source/isaac_pusht/docs/display.png" alt="Isaac-Pusht-v0" width="400">
+  <img src="source/docs/display.png" alt="Isaac-Pusht-v0" width="400">
 </div>
 
 ## Installation
@@ -62,7 +62,7 @@ This project supports data collection and visualization using the LeRobot v3.0 f
 Run the following command to start collecting data (including camera observations):
 
 ```bash
-python isaac_pushT/scripts/record_lerobot.py --task Isaac-Pusht-v0 --num_episodes 200 --enable_cameras
+python scripts/record_lerobot.py --task Isaac-Pusht-v0 --num_episodes 200 --enable_cameras
 ```
 
 ### 2. Data Visualization
@@ -72,4 +72,77 @@ After collection is complete, you can use the `lerobot` visualization tool to vi
 ```bash
 python -m lerobot.scripts.lerobot_dataset_viz --repo-id isaac_pusht --root data/isaac_pusht --episode-index 0
 ```
+
+## Policy Training (Diffusion / Flow Mapping)
+
+This project includes two Transformer-based policy learning algorithms:
+
+- `diffusion`: conditional diffusion policy
+- `flow_mapping`: flow matching policy
+
+Both algorithms use:
+
+- multimodal observations: `front image + back image + state`
+- a pretrained `ResNet18` image encoder
+- horizon-based action sequence modeling
+
+### 1. Train Diffusion Policy
+
+```bash
+python scripts/train.py --algo diffusion --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --epochs 500 --batch-size 32 --device cuda
+```
+
+### 2. Train Flow Mapping Policy
+
+```bash
+python scripts/train.py --algo flow_mapping --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --epochs 500 --batch-size 32 --device cuda
+```
+
+### 3. Freeze ResNet for Warmup (Optional)
+
+Freeze the ResNet18 backbone for early epochs, then unfreeze for fine-tuning:
+
+```bash
+python scripts/train.py --algo diffusion --horizon 16 --freeze-resnet --freeze-epochs 5
+```
+
+## Policy Evaluation
+
+### 1. Evaluate Diffusion Checkpoint
+
+```bash
+python scripts/eval.py --algo diffusion --ckpt checkpoints/best_diffusion.pt --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --device cuda
+```
+
+### 2. Evaluate Flow Mapping Checkpoint
+
+```bash
+python scripts/eval.py --algo flow_mapping --ckpt checkpoints/best_flow_mapping.pt --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --device cuda
+```
+
+## TensorBoard Visualization
+
+### 1. Training Curves
+
+Enable TensorBoard logging during training:
+
+```bash
+python scripts/train.py --algo diffusion --horizon 16 --tensorboard --tb-logdir runs --tb-run-name diffusion_h16_exp1
+```
+
+### 2. Evaluation Metrics
+
+Log evaluation metric (`eval/action_mse`) to TensorBoard:
+
+```bash
+python scripts/eval.py --algo diffusion --ckpt checkpoints/best_diffusion.pt --horizon 16 --tensorboard --tb-logdir runs --tb-run-name diffusion_h16_exp1 --tb-step 50
+```
+
+### 3. Start TensorBoard
+
+```bash
+tensorboard --logdir runs
+```
+
+Then open [http://localhost:6006](http://localhost:6006).
 
