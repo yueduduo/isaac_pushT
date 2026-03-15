@@ -381,14 +381,13 @@ def main():
                 # 3. 记录
                 if teleop.is_recording and has_input:
                     try:
-                        # 获取相机图像
-                        # 转换格式 (H,W,C) -> (C,H,W), [0,255] -> [0,1]
+                        # 获取相机图像 (直接存储为 uint8 格式，节省 75% 空间且不丢失精度)
+                        # 转换格式 (H,W,C) -> (C,H,W)
                         front_rgb_image = env.scene["front_wrirst_camera"].data.output["rgb"][0].cpu().numpy()
-                        front_img_tensor = np.moveaxis(front_rgb_image, -1, 0).astype(np.float32) / 255.0
-                    
+                        front_img_uint8 = np.moveaxis(front_rgb_image, -1, 0).astype(np.uint8)
                     
                         back_rgb_image = env.scene["back_wrirst_camera"].data.output["rgb"][0].cpu().numpy()
-                        back_img_tensor = np.moveaxis(back_rgb_image, -1, 0).astype(np.float32) / 255.0
+                        back_img_uint8 = np.moveaxis(back_rgb_image, -1, 0).astype(np.uint8)
                         
                         # 提取状态信息 (TCP + Object + Goal)
                         # 使用 -1 索引获取最后一个目标帧 (tcp)
@@ -402,8 +401,8 @@ def main():
                         state = np.concatenate([tcp_pos, tcp_quat, obj_pos, obj_quat, goal_pos, goal_quat])
                         
                         episode_buffer.append({
-                            "observation.front_wrist_camera_image": front_img_tensor,
-                            "observation.back_wrist_camera_image": back_img_tensor,
+                            "observation.front_wrist_camera_image": front_img_uint8,
+                            "observation.back_wrist_camera_image": back_img_uint8,
                             "observation.state": state.astype(np.float32),
                             "action": delta_action.cpu().numpy().astype(np.float32),
                             "task": TASK_DESCRIPTION,
