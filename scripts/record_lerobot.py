@@ -11,6 +11,7 @@ import torch
 import numpy as np
 import gymnasium as gym
 import traceback
+from scipy.spatial.transform import Rotation as R
 from pathlib import Path
 from collections.abc import Callable
 
@@ -55,8 +56,9 @@ ROBOT_TYPE = "franka"
 RENDER_WIDTH = 224
 RENDER_HEIGHT = 224
 STATE_DIM = 21           # tcp_pos(3)+quat(4) + obj_pos(3)+quat(4) + goal_pos(3)+quat(4)
-ACTION_DIM = 7           # pos_delta(3), rot_delta(3), gripper_action(1)
+ACTION_DIM = 8           # tcp_abs_pos(3), tcp_abs_quat_wxyz(4), gripper_action(1)
 TASK_DESCRIPTION = "Push the T block into the target area."
+TELEOP_DELTA_TO_TCP_SCALE = 0.1  # 将历史相对遥操作输入映射为绝对位姿命令增量
 
 DEFAULT_REPO_ID = args_cli.repo_id
 DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent / "data" / DEFAULT_REPO_ID
@@ -92,6 +94,43 @@ ACTION_FEATURES = {
 }
 
 DATASET_FEATURES = combine_feature_dicts(OBS_FEATURES, ACTION_FEATURES)
+
+
+def quat_wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
+    """Convert Isaac quaternion order (w, x, y, z) to SciPy order (x, y, z, w)."""
+    return np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float64)
+
+
+def quat_xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
+    """Convert SciPy quaternion order (x, y, z, w) to Isaac order (w, x, y, z)."""
+    return np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=np.float32)
+
+
+def to_absolute_pose_action(
+    current_tcp: np.ndarray,
+    current_tcp_quat_wxyz: np.ndarray,
+    command_action_delta: np.ndarray,
+) -> np.ndarray:
+    """将历史相对输入映射为绝对 TCP 位姿命令。
+
+    输出动作格式:
+        [x, y, z, qw, qx, qy, qz, gripper]
+    """
+    abs_action = np.zeros((ACTION_DIM,), dtype=np.float32)
+    delta_pos = command_action_delta[0:3] * TELEOP_DELTA_TO_TCP_SCALE
+    delta_rotvec = command_action_delta[3:6] * TELEOP_DELTA_TO_TCP_SCALE
+
+    target_pos = current_tcp.astype(np.float32) + delta_pos.astype(np.float32)
+
+    curr_rot = R.from_quat(quat_wxyz_to_xyzw(current_tcp_quat_wxyz))
+    delta_rot = R.from_rotvec(delta_rotvec.astype(np.float64))
+    target_quat_xyzw = (delta_rot * curr_rot).as_quat()
+    target_quat_wxyz = quat_xyzw_to_wxyz(target_quat_xyzw)
+
+    abs_action[0:3] = target_pos
+    abs_action[3:7] = target_quat_wxyz
+    abs_action[7] = np.float32(command_action_delta[6])
+    return abs_action
 
 class IsaacUITeleop:
     """自适应 UI 遥操：支持拖拽机械臂末端投影，实时闭环反馈"""
@@ -368,15 +407,22 @@ def main():
             with torch.no_grad():
                 # 获取当前 TCP 位置用于闭环映射
                 current_tcp = env.scene["tfs"].data.target_pos_w[0, -1, :].cpu().numpy()
+                current_tcp_quat = env.scene["tfs"].data.target_quat_w[0, -1, :].cpu().numpy()
                 
-                # 1. 获取动作 (基于绝对映射计算的 Delta)
-                delta_action = teleop.get_action(current_tcp).to(env.device)
+                # 1. 获取遥操作输入并转换为绝对 TCP 位姿命令
+                command_action_delta = teleop.get_action(current_tcp).to(env.device)
+                command_action_abs_np = to_absolute_pose_action(
+                    current_tcp=current_tcp,
+                    current_tcp_quat_wxyz=current_tcp_quat,
+                    command_action_delta=command_action_delta.cpu().numpy().astype(np.float32),
+                )
+                command_action = torch.from_numpy(command_action_abs_np).to(env.device)
                 
                 # 检查是否有输入
-                has_input = torch.any(torch.abs(delta_action[:6]) > 0.01)
+                has_input = torch.any(torch.abs(command_action_delta[:6]) > 0.01)
                 
                 # 2. 步进
-                obs, reward, terminated, truncated, info = env.step(delta_action.repeat(env.num_envs, 1))
+                obs, reward, terminated, truncated, info = env.step(command_action.repeat(env.num_envs, 1))
                 
                 # 3. 记录
                 if teleop.is_recording and has_input:
@@ -392,7 +438,7 @@ def main():
                         # 提取状态信息 (TCP + Object + Goal)
                         # 使用 -1 索引获取最后一个目标帧 (tcp)
                         tcp_pos = current_tcp
-                        tcp_quat = env.scene["tfs"].data.target_quat_w[0, -1, :].cpu().numpy()
+                        tcp_quat = current_tcp_quat
                         obj_pos = env.scene["t_block"].data.root_pos_w[0].cpu().numpy()
                         obj_quat = env.scene["t_block"].data.root_quat_w[0].cpu().numpy()
                         goal_pos = env.scene["goal_tee"].data.root_pos_w[0].cpu().numpy()
@@ -404,7 +450,7 @@ def main():
                             "observation.front_wrist_camera_image": front_img_uint8,
                             "observation.back_wrist_camera_image": back_img_uint8,
                             "observation.state": state.astype(np.float32),
-                            "action": delta_action.cpu().numpy().astype(np.float32),
+                            "action": command_action_abs_np.astype(np.float32),
                             "task": TASK_DESCRIPTION,
                         })
                     except Exception as e:

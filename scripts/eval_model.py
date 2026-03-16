@@ -24,8 +24,8 @@ parser.add_argument("--task", type=str, default="Isaac-Pusht-v0", help="Gym task
 parser.add_argument("--checkpoint", type=str, default="checkpoints/best_diffusion.pt", help="Path to model checkpoint")
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate")
 parser.add_argument("--max_steps", type=int, default=400, help="Max steps per episode (timeout)")
-parser.add_argument("--horizon", type=int, default=16, help="Temporal horizon used during training")
-parser.add_argument("--action-steps", type=int, default=8, help="Number of action steps to execute per inference")
+parser.add_argument("--horizon", type=int, default=32, help="Temporal horizon used during training")
+parser.add_argument("--action-steps", type=int, default=16, help="Number of action steps to execute per inference")
 
 # 增加 AppLauncher 的参数并解析
 AppLauncher.add_app_launcher_args(parser)
@@ -46,6 +46,11 @@ from isaaclab_tasks.utils import parse_env_cfg
 # Algo imports
 from algo.diffusion.policy import DiffusionPolicy
 from algo.diffusion.trainer import DiffusionConfig
+PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+from utils.tcp_trajectory_viz import visualize_tcp_chunk_trajectory
+
 
 def main():
     device = torch.device(args_cli.device if torch.cuda.is_available() else "cpu")
@@ -60,11 +65,19 @@ def main():
     env_cfg.terminations.time_out = None
     
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
+
+    # Debug draw interface for visualizing TCP future positions
+    try:
+        from isaacsim.util.debug_draw import _debug_draw
+
+        debug_draw = _debug_draw.acquire_debug_draw_interface()
+    except Exception:
+        debug_draw = None
     
     # 2. 初始化 Policy
-    # 维度信息: state(21), action(horizon * 7)
+    # 维度信息: state(21), action(horizon * 8)，单步动作为绝对 TCP 位姿 + gripper
     state_dim = 21
-    action_dim_per_step = 7
+    action_dim_per_step = 8
     
     policy = DiffusionPolicy(
         state_dim=state_dim, 
@@ -129,23 +142,37 @@ def main():
                     }
                     
                     # 4. 模型推理
-                    # 返回的是 (horizon * 7) 形状的张量
-                    flat_action_seq = policy.act(obs_dict) 
-                    
+                    # 返回的是 (horizon * 8) 形状的张量
+                    flat_action_seq = policy.act(obs_dict)
+
                     # 5. 执行一段动作序列 (Chunking Policy)
                     action_seq = flat_action_seq.view(args_cli.horizon, action_dim_per_step)
-                    
+                    if action_seq.shape[-1] != action_dim_per_step:
+                        raise ValueError(
+                            f"[Eval] 模型输出动作维度异常: got={action_seq.shape[-1]}, expected={action_dim_per_step}"
+                        )
+
                     # 确定本次循环要执行的步数 (不能超过 horizon，且受限于 max_steps)
                     num_to_exec = min(args_cli.action_steps, args_cli.horizon)
-                    
+
+                    # 5.1 可视化当前 chunk 内 TCP 在仿真中的未来轨迹（绝对位姿动作）
+                    if debug_draw is not None:
+                        visualize_tcp_chunk_trajectory(
+                            current_tcp_pos=current_tcp,
+                            action_seq=action_seq,
+                            num_steps=num_to_exec,
+                            debug_draw=debug_draw,
+                            action_mode="absolute",
+                        )
+
                     for i in range(num_to_exec):
                         # 如果环境已经结束或超时，提前跳出序列执行
                         if done or step_idx >= args_cli.max_steps:
                             break
-                        
+
                         # 取出序列中的当前动作
                         action = action_seq[i]
-                        
+
                         # 环境步进
                         obs, reward, terminated, truncated, info = env.step(action.unsqueeze(0).repeat(env.num_envs, 1))
                         

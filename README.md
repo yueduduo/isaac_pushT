@@ -4,7 +4,7 @@
 
 This repository contains the code for the Isaac-Pusht-v0 task.
 <div style="display: flex; justify-content: center;">
-  <img src="source/docs/display.png" alt="Isaac-Pusht-v0" width="400">
+  <img src="source/isaac_pusht/docs/display.png" alt="Isaac-Pusht-v0" width="400">
 </div>
 
 ## Installation

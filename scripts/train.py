@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--algo", type=str, choices=["diffusion", "flow_mapping"], required=True)
     parser.add_argument("--repo-id", type=str, default="isaac_pusht")
     parser.add_argument("--root", type=str, default="data/isaac_pusht")
-    parser.add_argument("--horizon", type=int, default=16)
+    parser.add_argument("--horizon", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)

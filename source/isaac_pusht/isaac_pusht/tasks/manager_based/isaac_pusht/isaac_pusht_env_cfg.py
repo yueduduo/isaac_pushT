@@ -74,9 +74,9 @@ GOAL_TEE_ROT = math_utils.quat_from_euler_xyz(
     torch.tensor([GOAL_TEE_YAW * math.pi / 180.0])
 )[0].tolist()
 
-# 机器人控制与状态
+# 机器人状态
 DEFAULT_JOINT_POSE = [0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952, 0., 0.]
-IK_CONTROL_SCALE = 0.1
+
 
 # 相机配置
 CAMERA_WIDTH = 224
@@ -280,10 +280,10 @@ class ActionsCfg:
         body_name="panda_hand", # 必须使用机器人原生的连杆名称
         controller=DifferentialIKControllerCfg(
             command_type="pose", 
-            use_relative_mode=True, 
+            use_relative_mode=False, # 要用绝对位置控制 采数据 回放数据 更加精准一致
             ik_method="dls",
         ),
-        scale=IK_CONTROL_SCALE, # 降低缩放 (从 0.5 降到 0.1)，防止单步位移过大导致 IK 崩溃
+        scale=1.0, # 绝对位姿命令不再做动作缩放，避免回放/采集语义不一致
         # 通过offset 将控制中心放置在 tcp_ball 的位置 (0.10 + 0.125 = 0.225)
         body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, TCP_OFFSET_Z]),
     )
