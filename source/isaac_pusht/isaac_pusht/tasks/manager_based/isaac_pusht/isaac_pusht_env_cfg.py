@@ -406,6 +406,9 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 1 / 50
         self.sim.render_interval = self.decimation
 
+        # randomization settings 需要设置！
+        self.seed = 0
+
         # [vis] create adjusted frame transformer config for visualizing the end-effector pose in the scene
         marker_cfg = FRAME_MARKER_CFG.copy()
         marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
