@@ -44,9 +44,9 @@ from mdp_custom import *
 ##
 
 # 场景布局
-GROUND_POS = [0, 0, -1.05]
-TABLE_POS = [0.5, 0, 0]
-TABLE_ROT = [0.707, 0, 0, 0.707]
+GROUND_POS = (0, 0, -1.05)
+TABLE_POS = (0.5, 0, 0)
+TABLE_ROT = (0.707, 0, 0, 0.707)
 WORKSPACE_SIZE = (0.4, 0.5, 0.001)
 WORKSPACE_POS = (0.5, 0.0, -0.0015)
 
@@ -62,8 +62,9 @@ TCP_OFFSET_Z = 0.225
 # 任务物体 (T-Block)
 T_BLOCK_POS = (0.5, 0, 0.05)
 
-T_BLOCK_RANDOM_X = (-0.1, 0.1)
-T_BLOCK_RANDOM_Y = (-0.1, 0.1)
+T_BLOCK_RANDOM_X = (-0.05, 0.05)
+T_BLOCK_RANDOM_Y = (-0.05, 0.05)
+T_BLOCK_RANDOM_YAW = math.pi / 4
 
 # 目标区域 (Goal Tee)
 GOAL_TEE_POS = (0.5, 0, -0.001)
@@ -285,7 +286,7 @@ class ActionsCfg:
         ),
         scale=1.0, # 绝对位姿命令不再做动作缩放，避免回放/采集语义不一致
         # 通过offset 将控制中心放置在 tcp_ball 的位置 (0.10 + 0.125 = 0.225)
-        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, TCP_OFFSET_Z]),
+        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=(0.0, 0.0, TCP_OFFSET_Z)),
     )
 
     gripper_action = mdp.BinaryJointPositionActionCfg(
@@ -345,7 +346,7 @@ class EventCfg:
             "pose_range": {
                 "x": T_BLOCK_RANDOM_X, 
                 "y": T_BLOCK_RANDOM_Y, 
-                "yaw": (0.0, 2 * math.pi),
+                "yaw": (0.0, T_BLOCK_RANDOM_YAW),
                 # 其他坐标轴（比如 z, roll, pitch）将默认保持初始状态
             }, 
             "velocity_range": {
@@ -387,8 +388,8 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
     # MDP settings
-    rewards: RewTerm = RewardsCfg()
-    terminations: DoneTerm = TerminationsCfg()
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
     xr: XrCfg = XrCfg(
         anchor_pos=(-0.1, -0.5, -1.05),
         anchor_rot=(0.866, 0, 0, -0.5),
@@ -410,10 +411,10 @@ class IsaacPushtEnvCfg(ManagerBasedRLEnvCfg):
         self.seed = 0
 
         # [vis] create adjusted frame transformer config for visualizing the end-effector pose in the scene
-        marker_cfg = FRAME_MARKER_CFG.copy()
+        marker_cfg = FRAME_MARKER_CFG.copy() # type: ignore
         marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
-        self.scene.tfs = FrameTransformerCfg(
+        self.scene.tfs = FrameTransformerCfg( # type: ignore
             prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
             debug_vis=False,
             visualizer_cfg=marker_cfg,

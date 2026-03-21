@@ -74,6 +74,10 @@ OBS_FEATURES = {
         "dtype": "float32",
         "shape": (STATE_DIM,),
     },
+    "observation.next_state": {
+        "dtype": "float32",
+        "shape": (STATE_DIM,),
+    },
     "observation.front_wrist_camera_image": {
         "dtype": "image",
         "shape": (3, RENDER_HEIGHT, RENDER_WIDTH),
@@ -93,7 +97,31 @@ ACTION_FEATURES = {
     }
 }
 
-DATASET_FEATURES = combine_feature_dicts(OBS_FEATURES, ACTION_FEATURES)
+# 标量 reward，形状 (1,) 便于与 LeRobot 张量批处理一致
+REWARD_FEATURES = {
+    "reward": {
+        "dtype": "float32",
+        "shape": (1,),
+    }
+}
+
+DATASET_FEATURES = combine_feature_dicts(
+    combine_feature_dicts(OBS_FEATURES, ACTION_FEATURES),
+    REWARD_FEATURES,
+)
+
+
+def pack_rl_state_vector(env) -> np.ndarray:
+    """从当前仿真场景读取与 observation.state 同构的 21 维向量（TCP + t_block + goal_tee）。"""
+    tcp_pos = env.scene["tfs"].data.target_pos_w[0, -1, :].cpu().numpy()
+    tcp_quat = env.scene["tfs"].data.target_quat_w[0, -1, :].cpu().numpy()
+    obj_pos = env.scene["t_block"].data.root_pos_w[0].cpu().numpy()
+    obj_quat = env.scene["t_block"].data.root_quat_w[0].cpu().numpy()
+    goal_pos = env.scene["goal_tee"].data.root_pos_w[0].cpu().numpy()
+    goal_quat = env.scene["goal_tee"].data.root_quat_w[0].cpu().numpy()
+    return np.concatenate([tcp_pos, tcp_quat, obj_pos, obj_quat, goal_pos, goal_quat]).astype(
+        np.float32
+    )
 
 
 def quat_wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
@@ -417,48 +445,65 @@ def main():
                     command_action_delta=command_action_delta.cpu().numpy().astype(np.float32),
                 )
                 command_action = torch.from_numpy(command_action_abs_np).to(env.device)
-                
-                # 检查是否有输入
-                has_input = torch.any(torch.abs(command_action_delta[:6]) > 0.01)
-                
-                # 2. 步进
-                obs, reward, terminated, truncated, info = env.step(command_action.repeat(env.num_envs, 1))
-                
-                # 3. 记录
-                if teleop.is_recording and has_input:
+
+                # 2. step 前：采集 state / 图像（与 observation.state 时刻一致）
+                recording_capture_ok = False
+                front_img_uint8 = None
+                back_img_uint8 = None
+                state_pre = None
+                if teleop.is_recording:
                     try:
-                        # 获取相机图像 (直接存储为 uint8 格式，节省 75% 空间且不丢失精度)
-                        # 转换格式 (H,W,C) -> (C,H,W)
-                        front_rgb_image = env.scene["front_wrirst_camera"].data.output["rgb"][0].cpu().numpy()
+                        front_rgb_image = env.scene["front_wrirst_camera"].data.output["rgb"][
+                            0
+                        ].cpu().numpy()
                         front_img_uint8 = np.moveaxis(front_rgb_image, -1, 0).astype(np.uint8)
-                    
-                        back_rgb_image = env.scene["back_wrirst_camera"].data.output["rgb"][0].cpu().numpy()
+
+                        back_rgb_image = env.scene["back_wrirst_camera"].data.output["rgb"][
+                            0
+                        ].cpu().numpy()
                         back_img_uint8 = np.moveaxis(back_rgb_image, -1, 0).astype(np.uint8)
-                        
-                        # 提取状态信息 (TCP + Object + Goal)
-                        # 使用 -1 索引获取最后一个目标帧 (tcp)
-                        tcp_pos = current_tcp
-                        tcp_quat = current_tcp_quat
-                        obj_pos = env.scene["t_block"].data.root_pos_w[0].cpu().numpy()
-                        obj_quat = env.scene["t_block"].data.root_quat_w[0].cpu().numpy()
-                        goal_pos = env.scene["goal_tee"].data.root_pos_w[0].cpu().numpy()
-                        goal_quat = env.scene["goal_tee"].data.root_quat_w[0].cpu().numpy()
-                        
-                        state = np.concatenate([tcp_pos, tcp_quat, obj_pos, obj_quat, goal_pos, goal_quat])
-                        
-                        episode_buffer.append({
-                            "observation.front_wrist_camera_image": front_img_uint8,
-                            "observation.back_wrist_camera_image": back_img_uint8,
-                            "observation.state": state.astype(np.float32),
-                            "action": command_action_abs_np.astype(np.float32),
-                            "task": TASK_DESCRIPTION,
-                        })
+
+                        state_pre = pack_rl_state_vector(env)
+                        recording_capture_ok = True
                     except Exception as e:
-                        print(f"Error during data collection: {e}")
+                        print(f"Error during data collection (pre-step): {e}")
+                        traceback.print_exc()
+
+                # 3. 步进
+                obs, reward, terminated, truncated, info = env.step(
+                    command_action.repeat(env.num_envs, 1)
+                )
+
+                # 4. step 后：写入 next_state、reward，再入缓冲（RL 转移 (s,a,r,s')）
+                if teleop.is_recording and recording_capture_ok:
+                    try:
+                        reward_t = reward.reshape(-1)[0]
+                        reward_f = float(reward_t.detach().cpu().item())
+                        term0 = bool(terminated.reshape(-1)[0].detach().cpu().item())
+                        trunc0 = bool(truncated.reshape(-1)[0].detach().cpu().item())
+                        episode_done = term0 or trunc0
+                        next_state = (
+                            state_pre.copy()
+                            if episode_done
+                            else pack_rl_state_vector(env)
+                        )
+                        episode_buffer.append(
+                            {
+                                "observation.front_wrist_camera_image": front_img_uint8,
+                                "observation.back_wrist_camera_image": back_img_uint8,
+                                "observation.state": state_pre,
+                                "observation.next_state": next_state,
+                                "reward": np.array([reward_f], dtype=np.float32),
+                                "action": command_action_abs_np.astype(np.float32),
+                                "task": TASK_DESCRIPTION,
+                            }
+                        )
+                    except Exception as e:
+                        print(f"Error during data collection (post-step): {e}")
                         traceback.print_exc()
                         break
 
-                # 4. 终止后保存并重置
+                # 5. 终止后保存并重置
                 if terminated.any():
                     if teleop.is_recording and len(episode_buffer) > 0:
                         print(f"\n[Episode {episode_idx+1}] Saving...")
