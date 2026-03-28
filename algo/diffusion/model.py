@@ -22,6 +22,8 @@ class DiffusionTransformerModel(nn.Module):
         head_layers: int = 3,
         num_heads: int = 8,
         dropout: float = 0.1,
+        obs_dim_feedforward: int | None = None,
+        head_dim_feedforward: int | None = None,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -34,6 +36,7 @@ class DiffusionTransformerModel(nn.Module):
             num_layers=obs_layers,
             num_heads=num_heads,
             dropout=dropout,
+            dim_feedforward=obs_dim_feedforward,
         )
         self.head = TransformerActionHead(
             action_dim=action_dim,
@@ -41,6 +44,7 @@ class DiffusionTransformerModel(nn.Module):
             num_layers=head_layers,
             num_heads=num_heads,
             dropout=dropout,
+            dim_feedforward=head_dim_feedforward,
         )
 
     def forward(self, noisy_action: torch.Tensor, timestep: torch.Tensor, obs: dict[str, torch.Tensor]) -> torch.Tensor:

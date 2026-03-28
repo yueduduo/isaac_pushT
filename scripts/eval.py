@@ -10,13 +10,12 @@ import torch
 import torch.nn.functional as F
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-EXT_ROOT = PROJECT_ROOT / "source" / "isaac_pusht"
-if str(EXT_ROOT) not in sys.path:
-    sys.path.append(str(EXT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
-from isaac_pusht.algo.diffusion.policy import DiffusionPolicy
-from isaac_pusht.algo.flow_mapping.policy import FlowMappingPolicy
-from isaac_pusht.utils.dataset import DatasetConfig, build_dataloaders
+from algo.diffusion.policy import DiffusionPolicy
+from algo.flow_matching.policy import FlowMatchingPolicy
+from utils.dataset import DatasetConfig, build_dataloaders
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -26,7 +25,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("Evaluate PushT policy checkpoint on LeRobot dataset.")
-    parser.add_argument("--algo", type=str, choices=["diffusion", "flow_mapping"], required=True)
+    parser.add_argument("--algo", type=str, choices=["diffusion", "flow_matching"], required=True)
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--repo-id", type=str, default="isaac_pusht")
     parser.add_argument("--root", type=str, default="data/isaac_pusht")
@@ -63,6 +62,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         train_ratio=0.95,
+        val_split=True,
     )
 
     sample = next(iter(val_loader))
@@ -72,7 +72,7 @@ def main() -> None:
     if args.algo == "diffusion":
         policy = DiffusionPolicy(state_dim=state_dim, action_dim=action_dim, device=device)
     else:
-        policy = FlowMappingPolicy(state_dim=state_dim, action_dim=action_dim, device=device)
+        policy = FlowMatchingPolicy(state_dim=state_dim, action_dim=action_dim, device=device)
 
     policy.load(args.ckpt)
     mse = evaluate_action_mse(policy, val_loader)

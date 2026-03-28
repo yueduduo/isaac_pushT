@@ -1,4 +1,4 @@
-"""Trainer and sampler for flow mapping policy."""
+"""Trainer and sampler for flow matching policy."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from  algo.flow_mapping.model import FlowMappingTransformerModel
+from algo.flow_matching.model import FlowMatchingTransformerModel
 
 
 @dataclass
@@ -16,16 +16,19 @@ class FlowMatchingConfig:
     lr: float = 1e-4
     grad_clip_norm: float = 1.0
     ode_steps: int = 50
+    weight_decay: float = 1e-4
 
 
-class FlowMappingTrainer:
+class FlowMatchingTrainer:
     """Train and sample from a flow-matching action model."""
 
-    def __init__(self, model: FlowMappingTransformerModel, config: FlowMatchingConfig, device: torch.device):
+    def __init__(self, model: FlowMatchingTransformerModel, config: FlowMatchingConfig, device: torch.device):
         self.model = model.to(device)
         self.config = config
         self.device = device
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config.lr, weight_decay=1e-4)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+        )
 
     def _move_obs(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return obs
@@ -36,37 +39,37 @@ class FlowMappingTrainer:
             return action
         return action.flatten(1)
 
+    def train_step(self, batch: dict) -> float:
+        self.model.train()
+        obs = self._move_obs(batch["obs"])
+        action = batch["action"]
+        action = self._flatten_action(action)
+
+        x0 = torch.randn_like(action)
+        t = torch.rand(action.shape[0], device=self.device)
+        t_expand = t.unsqueeze(-1)
+        x_t = (1.0 - t_expand) * x0 + t_expand * action
+        target_v = action - x0
+
+        pred_v = self.model(x_t, t, obs)
+        loss = F.mse_loss(pred_v, target_v)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
+        self.optimizer.step()
+        return float(loss.item())
+
     def train_epoch(self, dataloader: torch.utils.data.DataLoader) -> float:
         self.model.train()
         losses: list[float] = []
-        
         pbar = tqdm(dataloader, desc="  Training", leave=False, mininterval=1.0)
         for i, batch in enumerate(pbar):
             if i == 0:
                 torch.cuda.synchronize()
-            
-            obs = self._move_obs(batch["obs"])
-            action = batch["action"]
-            action = self._flatten_action(action)
-
-            x0 = torch.randn_like(action)
-            t = torch.rand(action.shape[0], device=self.device)
-            t_expand = t.unsqueeze(-1)
-            x_t = (1.0 - t_expand) * x0 + t_expand * action
-            target_v = action - x0
-
-            pred_v = self.model(x_t, t, obs)
-            loss = F.mse_loss(pred_v, target_v)
-
-            self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
-            self.optimizer.step()
-            
-            loss_val = loss.item()
+            loss_val = self.train_step(batch)
             losses.append(loss_val)
             pbar.set_postfix(loss=f"{loss_val:.4f}")
-            
         return float(sum(losses) / max(len(losses), 1))
 
     @torch.no_grad()

@@ -1,4 +1,4 @@
-"""Inference wrapper for diffusion policy."""
+"""Inference wrapper for flow matching policy."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from typing import Any
 
 import torch
 
-from algo.diffusion.model import DiffusionTransformerModel
-from algo.diffusion.trainer import DiffusionConfig, DiffusionTrainer
+from algo.flow_matching.model import FlowMatchingTransformerModel
+from algo.flow_matching.trainer import FlowMatchingConfig, FlowMatchingTrainer
 
 
-class DiffusionPolicy:
+class FlowMatchingPolicy:
     """High-level policy API for train/eval scripts."""
 
     def __init__(
@@ -19,13 +19,13 @@ class DiffusionPolicy:
         state_dim: int,
         action_dim: int,
         device: torch.device,
-        diffusion_cfg: DiffusionConfig | None = None,
+        matching_cfg: FlowMatchingConfig | None = None,
         model_kw: dict[str, Any] | None = None,
     ):
         self.device = device
         mk = model_kw or {}
-        self.model = DiffusionTransformerModel(state_dim=state_dim, action_dim=action_dim, **mk)
-        self.trainer = DiffusionTrainer(self.model, diffusion_cfg or DiffusionConfig(), device=device)
+        self.model = FlowMatchingTransformerModel(state_dim=state_dim, action_dim=action_dim, **mk)
+        self.trainer = FlowMatchingTrainer(self.model, matching_cfg or FlowMatchingConfig(), device=device)
 
     @torch.no_grad()
     def act(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:

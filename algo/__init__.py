@@ -1,6 +1,4 @@
-"""Algorithm modules for Isaac PushT."""
-
 from .diffusion.policy import DiffusionPolicy
-from .flow_mapping.policy import FlowMappingPolicy
+from .flow_matching.policy import FlowMatchingPolicy
 
-__all__ = ["DiffusionPolicy", "FlowMappingPolicy"]
+__all__ = ["DiffusionPolicy", "FlowMatchingPolicy"]

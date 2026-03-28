@@ -1,4 +1,10 @@
-"""LeRobot dataset adapters for multimodal PushT policies."""
+"""LeRobot dataset adapters for multimodal PushT policies.
+
+Train/Val 划分说明（见 build_dataloaders）：
+- 默认 val_split=False：不划分验证集，全部窗口只用于训练（val_loader 为 None）。
+- 若 val_split=True：再按 split_by_episode 等在 train/val 间划分；split_by_episode=True 时按整条轨迹划分，
+  避免同轨迹跨 train/val。split_by_episode=False 时为窗口级 random_split（旧行为）。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 
 
 FRONT_KEY = "observation.front_wrist_camera_image"
@@ -38,6 +44,10 @@ class LeRobotPushTDataset(Dataset):
         self.cfg = cfg
         self.device = device
         self.dataset = LeRobotDataset(repo_id=cfg.repo_id, root=Path(cfg.root))
+        self.state_mean: torch.Tensor | None = None
+        self.state_std: torch.Tensor | None = None
+        self.action_mean: torch.Tensor | None = None
+        self.action_std: torch.Tensor | None = None
         
         # [优化1] 预加载所有状态和动作 (使用 .clone() 彻底断开磁盘映射句柄)
         num_frames = len(self.dataset.hf_dataset)
@@ -46,7 +56,10 @@ class LeRobotPushTDataset(Dataset):
         self.all_states = torch.from_numpy(np.array(self.dataset.hf_dataset.select_columns([cfg.state_key])[cfg.state_key])).float().clone()
         self.all_actions = torch.from_numpy(np.array(self.dataset.hf_dataset.select_columns([cfg.action_key])[cfg.action_key])).float().clone()
         
-        self.valid_start_indices = self._build_valid_start_indices()
+        # valid_start_indices：全局帧下标，每个元素是一个窗口的起点；
+        # episode_id_per_window[i]：第 i 个窗口属于哪一条 episode（与 meta.episodes 下标对齐），
+        # 供 build_dataloaders(val_split=True, split_by_episode=True) 使用，保证整条轨迹不跨 train/val。
+        self.valid_start_indices, self.episode_id_per_window = self._build_valid_start_indices()
         # 将有效索引转换为张量，以便在 collate 中快速切片
         self.valid_start_indices_ts = torch.tensor(self.valid_start_indices, dtype=torch.long)
         
@@ -59,33 +72,51 @@ class LeRobotPushTDataset(Dataset):
         import gc
         gc.collect()
 
+    def set_normalization_stats(
+        self,
+        state_mean: torch.Tensor,
+        state_std: torch.Tensor,
+        action_mean: torch.Tensor,
+        action_std: torch.Tensor,
+    ) -> None:
+        self.state_mean = state_mean.detach().cpu().float().clone()
+        self.state_std = state_std.detach().cpu().float().clone()
+        self.action_mean = action_mean.detach().cpu().float().clone()
+        self.action_std = action_std.detach().cpu().float().clone()
+
     def __len__(self) -> int:
         return len(self.valid_start_indices)
 
-    def _build_valid_start_indices(self) -> list[int]:
+    def _build_valid_start_indices(self) -> tuple[list[int], list[int]]:
+        """枚举每条轨迹内所有合法窗口起点，并记录窗口所属 episode，用于后续按轨迹划分 train/val。"""
         if self.cfg.horizon < 1:
             raise ValueError(f"horizon must be >= 1, got {self.cfg.horizon}")
         
         print(f"[Dataset] Calculating valid start indices (horizon={self.cfg.horizon})...")
-        valid_indices = []
+        valid_indices: list[int] = []
+        # 与 valid_indices 等长：窗口 i 来自第几条 episode（0..E-1）
+        episode_id_per_window: list[int] = []
         
         # LeRobotDataset v3.0 存储 episode 边界在 self.dataset.meta.episodes 中
         episodes = self.dataset.meta.episodes
-        for ep_info in episodes:
+        for episode_id, ep_info in enumerate(episodes):
             start_i = ep_info["dataset_from_index"]
             end_i = ep_info["dataset_to_index"]
             # 有效起始索引 idx 需满足 [idx, idx + horizon) 都在 [start_i, end_i) 内
             # 即 idx >= start_i 且 idx + horizon <= end_i => idx <= end_i - horizon
             max_valid_start = end_i - self.cfg.horizon
             if max_valid_start >= start_i:
-                valid_indices.extend(range(start_i, max_valid_start + 1))
+                for idx in range(start_i, max_valid_start + 1):
+                    valid_indices.append(idx)
+                    # 该窗口完全落在本 episode 的 [start_i, end_i) 内，故归属 episode_id
+                    episode_id_per_window.append(episode_id)
     
 
         if len(valid_indices) == 0:
             raise ValueError("No valid sequence windows found. Check horizon or dataset integrity.")
         
         print(f"[Dataset] Found {len(valid_indices)} valid windows.")
-        return valid_indices
+        return valid_indices, episode_id_per_window
 
     def _preload_images_to_memory(self) -> None:
         num_frames = len(self.dataset.hf_dataset)
@@ -139,6 +170,11 @@ class LeRobotPushTDataset(Dataset):
         # [B, 1] + [H] -> [B, H] 索引网格
         offsets = torch.arange(self.cfg.horizon, device=sample_indices.device)
         action_batch = self.all_actions[sample_indices.unsqueeze(1) + offsets]
+        state_batch = self.all_states[sample_indices]
+        if self.state_mean is not None and self.state_std is not None:
+            state_batch = (state_batch - self.state_mean) / self.state_std
+        if self.action_mean is not None and self.action_std is not None:
+            action_batch = (action_batch - self.action_mean.view(1, 1, -1)) / self.action_std.view(1, 1, -1)
         
         # 2. 在返回前立即 to(device)，将 CPU 压力释放给异步 DMA
         dev = self.device
@@ -146,10 +182,50 @@ class LeRobotPushTDataset(Dataset):
             "obs": {
                 self.cfg.front_key: self.all_front_images[sample_indices].to(dev),
                 self.cfg.back_key: self.all_back_images[sample_indices].to(dev),
-                self.cfg.state_key: self.all_states[sample_indices].to(dev),
+                self.cfg.state_key: state_batch.to(dev),
             },
             "action": action_batch.to(dev),
         }
+
+
+def _episode_level_split_indices(
+    episode_id_per_window: list[int],
+    train_ratio: float,
+    seed: int,
+) -> tuple[list[int], list[int]]:
+    """按 episode 划分 train/val 的窗口下标列表。
+
+    目的：避免「同一条轨迹 / 同一个 rollout」同时出现在 train 与 val。
+    做法：先把属于同一 episode_id 的所有样本窗口索引归为一组，再随机打乱 episode 顺序，
+    按 train_ratio 决定多少条 episode 划入 val；每条 episode 要么整组进 train，要么整组进 val，
+    不会出现同轨迹部分窗口在 train、部分在 val 的情况。
+
+    train_ratio 在此表示「大约希望保留在训练侧的 episode 比例」（val 至少 1 条、train 至少 1 条，
+    当总 episode 数 >= 2 时）；不是严格的「窗口数 95/5」。
+    """
+    by_ep: dict[int, list[int]] = {}
+    for window_i, ep_id in enumerate(episode_id_per_window):
+        by_ep.setdefault(ep_id, []).append(window_i)
+    episode_ids = sorted(by_ep.keys())
+    n_ep = len(episode_ids)
+    if n_ep == 0:
+        raise ValueError("No episodes in dataset.")
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(n_ep, generator=g).tolist()
+    shuffled = [episode_ids[i] for i in perm]
+    if n_ep == 1:
+        print(
+            "[Dataset] 仅 1 条 episode，无法做 episode 级划分；退回按窗口 random_split（与旧行为一致）。"
+        )
+        return [], []  # 由调用方改用 random_split
+    n_val_ep = max(1, int(round((1.0 - train_ratio) * n_ep)))
+    n_val_ep = min(n_val_ep, n_ep - 1)
+    # val：最后 n_val_ep 条轨迹的全部窗口；train：其余轨迹的全部窗口 → 轨迹不跨两侧
+    val_ep_ids = frozenset(shuffled[-n_val_ep:])
+    train_ep_ids = frozenset(shuffled[:-n_val_ep])
+    train_idx = [i for i, e in enumerate(episode_id_per_window) if e in train_ep_ids]
+    val_idx = [i for i, e in enumerate(episode_id_per_window) if e in val_ep_ids]
+    return train_idx, val_idx
 
 
 def build_dataloaders(
@@ -158,7 +234,22 @@ def build_dataloaders(
     num_workers: int = 0,
     train_ratio: float = 0.95,
     device: torch.device = torch.device("cpu"),
-) -> tuple[DataLoader, DataLoader]:
+    split_by_episode: bool = True,
+    split_seed: int = 42,
+    val_split: bool = False,
+) -> tuple[DataLoader, DataLoader | None]:
+    """构建 train/val DataLoader。
+
+    val_split（默认 False）：
+        不划分验证集，全部窗口用于训练，返回 (train_loader, None)。
+    若 val_split=True：
+        按 train_ratio 等规则划分训练集与验证集。
+
+    split_by_episode（默认 True，仅当 val_split=True 时参与逻辑）：
+        按整条轨迹划分，保证同轨迹不跨 train/val；验证指标更接近「未见过的完整 episode」。
+    若设为 False：
+        按窗口随机划分（random_split），同一条轨迹的 valid 窗口可能同时出现在 train 与 val。
+    """
     dataset = LeRobotPushTDataset(cfg, device=device)
     
     # [优化] Windows 下大内存预加载时，num_workers > 0 会导致严重的启动延迟
@@ -168,13 +259,43 @@ def build_dataloaders(
             print(f"[Dataset] Windows detected with preloaded RAM. Forcing num_workers=0 to avoid startup hang.")
             num_workers = 0
 
-    train_size = int(len(dataset) * train_ratio)
-    val_size = len(dataset) - train_size
+    if not val_split:
+        print("[Dataset] val_split=False：全部窗口用于训练，不构建验证集。")
+        train_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=False,
+            collate_fn=dataset.collate_fn,
+        )
+        return train_loader, None
 
-    train_ds, val_ds = random_split(
-        dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    if split_by_episode:
+        train_idx, val_idx = _episode_level_split_indices(
+            dataset.episode_id_per_window, train_ratio=train_ratio, seed=split_seed
+        )
+        if len(train_idx) == 0 and len(val_idx) == 0:
+            # 例如仅 1 条 episode：无法同时保留 train/val 各至少一条轨迹，退回窗口级划分
+            split_by_episode = False
+        else:
+            print(
+                f"[Dataset] Episode-level split: {len(train_idx)} train windows, {len(val_idx)} val windows "
+                f"(train_ratio≈{train_ratio} 作用于 episode 条数)."
+            )
+            train_ds = Subset(dataset, train_idx)
+            val_ds = Subset(dataset, val_idx)
+
+    if not split_by_episode:
+        # 窗口级随机划分：不保证轨迹不跨 train/val；可能与历史实验一致
+        train_size = int(len(dataset) * train_ratio)
+        val_size = len(dataset) - train_size
+        train_ds, val_ds = random_split(
+            dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(split_seed),
+        )
+        print(f"[Dataset] Random window split: train={train_size}, val={val_size}.")
     
     # 注意：这里需要传入 dataset.collate_fn，它绑定了具体的 dataset 实例
     train_loader = DataLoader(

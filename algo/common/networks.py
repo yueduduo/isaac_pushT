@@ -65,6 +65,7 @@ class MultimodalTransformerEncoder(nn.Module):
         num_layers: int = 4,
         num_heads: int = 8,
         dropout: float = 0.1,
+        dim_feedforward: int | None = None,
     ):
         super().__init__()
         # Keep arguments for API compatibility with callers.
@@ -82,10 +83,11 @@ class MultimodalTransformerEncoder(nn.Module):
         self.back_type = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.state_type = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
+        d_ff = int(embed_dim * 4) if dim_feedforward is None else int(dim_feedforward)
         enc_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
+            dim_feedforward=d_ff,
             dropout=dropout,
             batch_first=True,
             activation="gelu",
@@ -131,16 +133,18 @@ class TransformerActionHead(nn.Module):
         num_layers: int = 3,
         num_heads: int = 8,
         dropout: float = 0.1,
+        dim_feedforward: int | None = None,
     ):
         super().__init__()
         self.action_proj = nn.Linear(action_dim, embed_dim)
         self.time_embed = SinusoidalTimeEmbedding(embed_dim)
         self.time_proj = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.GELU(), nn.Linear(embed_dim, embed_dim))
 
+        d_ff = int(embed_dim * 4) if dim_feedforward is None else int(dim_feedforward)
         layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
+            dim_feedforward=d_ff,
             dropout=dropout,
             batch_first=True,
             activation="gelu",

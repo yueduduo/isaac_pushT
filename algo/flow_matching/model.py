@@ -1,4 +1,4 @@
-"""Transformer-based flow mapping model for PushT actions."""
+"""Transformer-based flow matching model for PushT actions."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import torch.nn as nn
 from algo.common.networks import MultimodalTransformerEncoder, TransformerActionHead
 
 
-class FlowMappingTransformerModel(nn.Module):
+class FlowMatchingTransformerModel(nn.Module):
     """Predict velocity field v_t(x_t | obs) for flow matching."""
 
     def __init__(
@@ -22,6 +22,8 @@ class FlowMappingTransformerModel(nn.Module):
         head_layers: int = 3,
         num_heads: int = 8,
         dropout: float = 0.1,
+        obs_dim_feedforward: int | None = None,
+        head_dim_feedforward: int | None = None,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -34,6 +36,7 @@ class FlowMappingTransformerModel(nn.Module):
             num_layers=obs_layers,
             num_heads=num_heads,
             dropout=dropout,
+            dim_feedforward=obs_dim_feedforward,
         )
         self.head = TransformerActionHead(
             action_dim=action_dim,
@@ -41,6 +44,7 @@ class FlowMappingTransformerModel(nn.Module):
             num_layers=head_layers,
             num_heads=num_heads,
             dropout=dropout,
+            dim_feedforward=head_dim_feedforward,
         )
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, obs: dict[str, torch.Tensor]) -> torch.Tensor:

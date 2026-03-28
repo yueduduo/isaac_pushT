@@ -46,6 +46,7 @@ from isaaclab_tasks.utils import parse_env_cfg
 # Algo imports
 from algo.diffusion.policy import DiffusionPolicy
 from algo.diffusion.trainer import DiffusionConfig
+from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats, normalize_state
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
@@ -95,6 +96,8 @@ def main():
 
     print(f"Loading checkpoint: {ckpt_path}")
     policy.load(ckpt_path)
+    norm_path = ckpt_norm_path(ckpt_path)
+    state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=device)
     
     success_count = 0
     total_reward = 0
@@ -134,6 +137,7 @@ def main():
                     
                     state_vec = np.concatenate([current_tcp, tcp_quat, obj_pos, obj_quat, goal_pos, goal_quat])
                     state_tensor = torch.from_numpy(state_vec.astype(np.float32)).to(device)
+                    state_tensor = normalize_state(state_tensor, state_mean, state_std)
                     
                     obs_dict = {
                         "observation.front_wrist_camera_image": front_img,
@@ -147,6 +151,7 @@ def main():
 
                     # 5. 执行一段动作序列 (Chunking Policy)
                     action_seq = flat_action_seq.view(args_cli.horizon, action_dim_per_step)
+                    action_seq = denormalize_action(action_seq, action_mean, action_std)
                     if action_seq.shape[-1] != action_dim_per_step:
                         raise ValueError(
                             f"[Eval] 模型输出动作维度异常: got={action_seq.shape[-1]}, expected={action_dim_per_step}"
@@ -190,7 +195,7 @@ def main():
                             obj_pos = env.scene["t_block"].data.root_pos_w[0].cpu().numpy()
                             goal_pos = env.scene["goal_tee"].data.root_pos_w[0].cpu().numpy()
                             dist = np.linalg.norm(obj_pos - goal_pos)
-                            if dist < 0.05: # 5cm 阈值视为成功
+                            if dist < 0.01: # 5cm 阈值视为成功
                                 is_success = True
                                 done = True
                                 print(f"  [SUCCESS] Triggered by distance: {dist:.4f} < 0.05m")

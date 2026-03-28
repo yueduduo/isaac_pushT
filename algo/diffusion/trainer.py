@@ -18,6 +18,7 @@ class DiffusionConfig:
     beta_end: float = 2e-2
     lr: float = 1e-4
     grad_clip_norm: float = 1.0
+    weight_decay: float = 1e-4
 
 
 class DiffusionTrainer:
@@ -27,7 +28,9 @@ class DiffusionTrainer:
         self.model = model.to(device)
         self.config = config
         self.device = device
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config.lr, weight_decay=1e-4)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+        )
 
         betas = torch.linspace(config.beta_start, config.beta_end, config.num_diffusion_steps, device=device)
         alphas = 1.0 - betas
@@ -46,42 +49,46 @@ class DiffusionTrainer:
             return action
         return action.flatten(1)
 
+    def train_step(self, batch: dict) -> float:
+        self.model.train()
+        obs = self._move_obs(batch["obs"])
+        action = batch["action"]
+        action = self._flatten_action(action)
+        bsz = action.shape[0]
+
+        t = torch.randint(0, self.config.num_diffusion_steps, (bsz,), device=self.device)
+        noise = torch.randn_like(action)
+        alpha_bar_t = self.alpha_bars[t].unsqueeze(-1)
+        noisy_action = torch.sqrt(alpha_bar_t) * action + torch.sqrt(1.0 - alpha_bar_t) * noise
+
+        pred_noise = self.model(noisy_action, t, obs)
+        loss = F.mse_loss(pred_noise, noise)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
+        self.optimizer.step()
+        return float(loss.item())
+
     def train_epoch(self, dataloader: torch.utils.data.DataLoader) -> float:
         self.model.train()
         losses: list[float] = []
-        
         pbar = tqdm(dataloader, desc="  Training", leave=False, mininterval=1.0)
         for i, batch in enumerate(pbar):
             if i == 0:
                 torch.cuda.synchronize()
-            
-            obs = self._move_obs(batch["obs"])
-            # action 也已经在 collate_fn 中搬运到了 GPU
-            action = batch["action"]
-            action = self._flatten_action(action)
-            bsz = action.shape[0]
-
-            t = torch.randint(0, self.config.num_diffusion_steps, (bsz,), device=self.device)
-            noise = torch.randn_like(action)
-            alpha_bar_t = self.alpha_bars[t].unsqueeze(-1)
-            noisy_action = torch.sqrt(alpha_bar_t) * action + torch.sqrt(1.0 - alpha_bar_t) * noise
-
-            pred_noise = self.model(noisy_action, t, obs)
-            loss = F.mse_loss(pred_noise, noise)
-
-            self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
-            self.optimizer.step()
-            
-            loss_val = loss.item()
+            loss_val = self.train_step(batch)
             losses.append(loss_val)
             pbar.set_postfix(loss=f"{loss_val:.4f}")
-
         return float(sum(losses) / max(len(losses), 1))
 
     @torch.no_grad()
-    def sample_actions(self, obs: dict[str, torch.Tensor], num_steps: int | None = None) -> torch.Tensor:
+    def sample_actions(
+        self,
+        obs: dict[str, torch.Tensor],
+        num_steps: int | None = None,
+        deterministic: bool = False,
+    ) -> torch.Tensor:
         self.model.eval()
         obs = self._move_obs(obs)
         bsz = obs["observation.state"].shape[0]
@@ -98,7 +105,15 @@ class DiffusionTrainer:
             beta = self.betas[t_idx]
             mean = (x - (beta / torch.sqrt(1.0 - alpha_bar)) * pred_noise) / torch.sqrt(alpha)
             if t_idx > 0:
-                x = mean + torch.sqrt(beta) * torch.randn_like(x)
+                # Use posterior variance Var(q(x_{t-1} | x_t, x_0)) rather than raw beta.
+                # This matches the DDPM sampling equation for epsilon-prediction parameterization.
+                alpha_bar_prev = self.alpha_bars[t_idx - 1]
+                posterior_var = beta * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar)
+                posterior_var = torch.clamp(posterior_var, min=1e-20)
+                if deterministic:
+                    x = mean
+                else:
+                    x = mean + torch.sqrt(posterior_var) * torch.randn_like(x)
             else:
                 x = mean
         return x
