@@ -123,12 +123,14 @@ from isaaclab_tasks.utils import parse_env_cfg
 from isaac_pusht.tasks.manager_based.isaac_pusht.isaac_pusht_env_cfg import DEFAULT_JOINT_POSE
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_LERO_SRC = PROJECT_ROOT / "lerobot" / "src"
+if str(_LERO_SRC) not in sys.path:
+    sys.path.insert(0, str(_LERO_SRC))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from algo.diffusion.policy import DiffusionPolicy
-from algo.diffusion.trainer import DiffusionConfig
+from utils.lerobot_push_diffusion import PushTLerobotPolicyFacade, load_trainer_from_checkpoint
 from utils.dataset import BACK_KEY, FRONT_KEY, STATE_KEY
 from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats, normalize_state
 from utils.tcp_trajectory_viz import visualize_tcp_chunk_trajectory
@@ -295,7 +297,7 @@ def policy_obs_from_dataset_frame(
 
 def load_policy(
     policy_device: torch.device,
-) -> tuple[DiffusionPolicy, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[PushTLerobotPolicyFacade, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     ckpt_path = Path(args_cli.checkpoint)
     if not ckpt_path.is_absolute():
         ckpt_path = PROJECT_ROOT / ckpt_path
@@ -303,15 +305,14 @@ def load_policy(
         print(f"[ModelReplay] 未找到 checkpoint：{ckpt_path}")
         simulation_app.close()
         sys.exit(1)
-    flat_action_dim = args_cli.horizon * ACTION_DIM
-    policy = DiffusionPolicy(
-        state_dim=STATE_DIM,
-        action_dim=flat_action_dim,
-        device=policy_device,
-        diffusion_cfg=DiffusionConfig(),
-    )
     print(f"[ModelReplay] 加载权重：{ckpt_path}（horizon={args_cli.horizon}）")
-    policy.load(ckpt_path)
+    trainer, _, _ = load_trainer_from_checkpoint(
+        ckpt_path,
+        device=policy_device,
+        lr=1e-4,
+        grad_clip_norm=1.0,
+    )
+    policy = PushTLerobotPolicyFacade(trainer)
     norm_path = ckpt_norm_path(ckpt_path)
     state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=policy_device)
     return policy, state_mean, state_std, action_mean, action_std
@@ -388,7 +389,7 @@ def replay_episode(
     env,
     dataset: LeRobotDataset,
     ep_idx: int,
-    policy: DiffusionPolicy,
+    policy: PushTLerobotPolicyFacade,
     policy_device: torch.device,
     state_mean: torch.Tensor,
     state_std: torch.Tensor,

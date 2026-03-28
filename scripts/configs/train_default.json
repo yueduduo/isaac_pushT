@@ -1,6 +1,5 @@
 {
   "train": {
-    "algo": "diffusion",
     "repo_id": "isaac_pusht",
     "root": "data/isaac_pusht",
     "train_steps": 5000,
@@ -9,10 +8,14 @@
     "num_workers": 0,
     "device": "cuda",
     "save_dir": "checkpoints",
+    "horizon": 32,
     "diffusion_steps": 100,
-    "flow_steps": 10,
+    "n_obs_steps": 1,
+    "n_action_steps": null,
     "freeze_resnet": false,
     "freeze_steps": 0,
+    "grad_clip_norm": 1.0,
+    "optimizer_weight_decay": null,
     "tensorboard": true,
     "tb_logdir": "runs",
     "tb_run_name": null,
@@ -23,36 +26,10 @@
     "train_ratio": 0.95,
     "split_seed": 42
   },
-  "diffusion_model": {
-    "image_size": 224,
-    "embed_dim": 256,
-    "patch_size": 16,
-    "obs_layers": 4,
-    "head_layers": 3,
-    "num_heads": 8,
-    "dropout": 0.1,
-    "obs_dim_feedforward": null,
-    "head_dim_feedforward": null
-  },
-  "flow_matching_model": {
-    "image_size": 224,
-    "embed_dim": 256,
-    "patch_size": 16,
-    "obs_layers": 4,
-    "head_layers": 3,
-    "num_heads": 8,
-    "dropout": 0.1,
-    "obs_dim_feedforward": null,
-    "head_dim_feedforward": null
-  },
   "diffusion_trainer": {
     "beta_start": 0.0001,
     "beta_end": 0.02,
-    "grad_clip_norm": 1.0,
     "weight_decay": 0.0001
   },
-  "flow_matching_trainer": {
-    "grad_clip_norm": 1.0,
-    "weight_decay": 0.0001
-  }
+  "lerobot_diffusion": {}
 }

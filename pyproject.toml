@@ -145,5 +145,5 @@ markers = [
 name = "isaac_pusht"
 version = "0.1.0"
 dependencies = [
-    "lerobot",
+    "lerobot==0.4.4",
 ]

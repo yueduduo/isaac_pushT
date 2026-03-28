@@ -1,16 +1,5 @@
 """
-离线评估：模型在「数据集里的观测」上采样得到的动作，与数据集中监督的 horizon 动作序列的差距。
-
-与训练一致：
-  - 观测来自 collate_fn 的 batch["obs"]（图像 + observation.state 在时刻 t）
-  - 真值动作是 batch["action"]，形状 [B, horizon, 8]，与训练时 flatten 后送入扩散的向量一致
-
-指标：
-  - action_mse：所有已评估样本、所有维度上的全局均方误差（sum_sq / 元素总数）
-  - mean_l2_full_chunk：每条样本 flatten 后的 L2，再对所有窗口取平均
-  - mean_l2_step0：仅第 0 个时间步 8 维与真值第 0 步的 L2，再对所有窗口取平均
-
-扩散采样是随机的；可用 --num-samples > 1 对同一条 obs 重复采样后取 pred 的均值再与 gt 比，减小方差。
+离线评估：在数据集观测上采样得到的动作 chunk 与监督序列的差距（LeRobot DiffusionPolicy）。
 """
 
 from __future__ import annotations
@@ -22,40 +11,44 @@ from pathlib import Path
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_LERO_SRC = PROJECT_ROOT / "lerobot" / "src"
+if str(_LERO_SRC) not in sys.path:
+    sys.path.insert(0, str(_LERO_SRC))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from algo.diffusion.policy import DiffusionPolicy
-from algo.diffusion.trainer import DiffusionConfig
 from utils.dataset import DatasetConfig, build_dataloaders
+from utils.lerobot_push_diffusion import PushTLerobotTrainer, load_trainer_from_checkpoint
 from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats
 
 ACTION_DIM_PER_STEP = 8
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser("Dataset action gap: model sample vs ground-truth action chunk.")
+    p = argparse.ArgumentParser("Dataset action gap (LeRobot diffusion).")
     p.add_argument("--ckpt", type=str, default="checkpoints/best_diffusion.pt")
     p.add_argument("--repo-id", type=str, default="isaac_pusht")
     p.add_argument("--root", type=str, default="data/isaac_pusht")
     p.add_argument("--horizon", type=int, default=32)
     p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--num-batches", type=int, default=0, help="每个 split 评估多少个 batch；0 表示跑完整个 loader。")
+    p.add_argument("--num-batches", type=int, default=0)
     p.add_argument("--split", type=str, choices=["train", "val", "both"], default="both")
-    p.add_argument("--num-samples", type=int, default=1, help="对同一 obs 重复采样次数；>1 时对采样结果取算术平均再与 gt 比。")
+    p.add_argument("--num-samples", type=int, default=1)
     p.add_argument(
         "--sample-steps",
         type=int,
         default=0,
-        help="逆扩散采样时使用的步数（≤ checkpoint 的 num_diffusion_steps）。0 表示使用全步数。",
+        help="推理扩散步数；0 表示使用 checkpoint 内默认（通常等于训练步数）。",
     )
-    p.add_argument("--seed", type=int, default=None, help="固定随机种子（CUDA + CPU），便于复现。")
+    p.add_argument("--seed", type=int, default=None)
     p.add_argument(
         "--deterministic-sampling",
         action="store_true",
-        help="采样时不注入随机噪声（每步直接取 posterior mean），用于排查采样随机性影响。",
+        help="LeRobot DDPM 仍带随机性；此开关当前仅打印提示，不改变采样。",
     )
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--grad-clip-norm", type=float, default=1.0)
     return p.parse_args()
 
 
@@ -67,7 +60,7 @@ def _device_from_arg(device_str: str) -> torch.device:
 
 @torch.no_grad()
 def eval_split(
-    policy: DiffusionPolicy,
+    trainer: PushTLerobotTrainer,
     loader: torch.utils.data.DataLoader,
     horizon: int,
     num_batches: int,
@@ -77,8 +70,11 @@ def eval_split(
     action_mean: torch.Tensor,
     action_std: torch.Tensor,
 ) -> dict[str, float]:
-    trainer = policy.trainer
-    trainer.model.eval()
+    if deterministic_sampling:
+        print("[ActionGap] 提示：--deterministic-sampling 对 LeRobot DDPM 未实现零方差采样，结果仍含随机性。")
+
+    trainer.policy.eval()
+    ninf = int(sample_steps) if sample_steps > 0 else None
 
     sum_sq = 0.0
     sum_l2 = 0.0
@@ -99,17 +95,12 @@ def eval_split(
 
         bsz = gt_flat.shape[0]
 
-        sample_arg = None if sample_steps <= 0 else sample_steps
         if num_samples <= 1:
-            pred_flat = trainer.sample_actions(
-                obs, num_steps=sample_arg, deterministic=deterministic_sampling
-            )
+            pred_flat = trainer.sample_action_chunk_flat(obs, num_inference_steps=ninf)
         else:
             acc = torch.zeros_like(gt_flat)
             for _ in range(num_samples):
-                acc = acc + trainer.sample_actions(
-                    obs, num_steps=sample_arg, deterministic=deterministic_sampling
-                )
+                acc = acc + trainer.sample_action_chunk_flat(obs, num_inference_steps=ninf)
             pred_flat = acc / float(num_samples)
 
         pred_flat_raw = denormalize_action(pred_flat, action_mean, action_std)
@@ -147,9 +138,7 @@ def main() -> None:
     ckpt_path = Path(args.ckpt)
     if not ckpt_path.is_absolute():
         ckpt_path = PROJECT_ROOT / ckpt_path
-    ckpt_obj = torch.load(ckpt_path, map_location="cpu")
-    ckpt_cfg = ckpt_obj.get("config", {})
-    diffusion_cfg = DiffusionConfig(**ckpt_cfg) if ckpt_cfg else DiffusionConfig()
+
     state_mean, state_std, action_mean, action_std = load_norm_stats(ckpt_norm_path(ckpt_path), device=device)
 
     dataset_cfg = DatasetConfig(
@@ -171,25 +160,21 @@ def main() -> None:
         train_ds = train_ds.dataset
     train_ds.set_normalization_stats(state_mean, state_std, action_mean, action_std)
 
-    state_dim = 21
-    action_dim = args.horizon * ACTION_DIM_PER_STEP
-    policy = DiffusionPolicy(
-        state_dim=state_dim,
-        action_dim=action_dim,
+    trainer, _, _ = load_trainer_from_checkpoint(
+        ckpt_path,
         device=device,
-        diffusion_cfg=diffusion_cfg,
+        lr=args.lr,
+        grad_clip_norm=args.grad_clip_norm,
     )
-    policy.load(ckpt_path)
 
     print(
-        f"[ActionGap] ckpt={ckpt_path.name} horizon={args.horizon} "
-        f"num_samples={args.num_samples} deterministic={args.deterministic_sampling}"
+        f"[ActionGap] ckpt={ckpt_path.name} horizon={args.horizon} num_samples={args.num_samples} "
+        f"sample_steps={args.sample_steps}"
     )
-    print(f"[ActionGap] diffusion_cfg={diffusion_cfg.__dict__}")
 
     if args.split in ("train", "both"):
         m = eval_split(
-            policy,
+            trainer,
             train_loader,
             horizon=args.horizon,
             num_batches=args.num_batches,
@@ -199,12 +184,14 @@ def main() -> None:
             action_mean=action_mean,
             action_std=action_std,
         )
-        print(f"[ActionGap] TRAIN  windows={int(m['num_windows'])}  action_mse={m['action_mse']:.6f}  "
-              f"mean_l2_full={m['mean_l2_full_chunk']:.6f}  mean_l2_step0={m['mean_l2_step0']:.6f}")
+        print(
+            f"[ActionGap] TRAIN  windows={int(m['num_windows'])}  action_mse={m['action_mse']:.6f}  "
+            f"mean_l2_full={m['mean_l2_full_chunk']:.6f}  mean_l2_step0={m['mean_l2_step0']:.6f}"
+        )
 
     if args.split in ("val", "both"):
         m = eval_split(
-            policy,
+            trainer,
             val_loader,
             horizon=args.horizon,
             num_batches=args.num_batches,
@@ -214,8 +201,10 @@ def main() -> None:
             action_mean=action_mean,
             action_std=action_std,
         )
-        print(f"[ActionGap] VAL    windows={int(m['num_windows'])}  action_mse={m['action_mse']:.6f}  "
-              f"mean_l2_full={m['mean_l2_full_chunk']:.6f}  mean_l2_step0={m['mean_l2_step0']:.6f}")
+        print(
+            f"[ActionGap] VAL    windows={int(m['num_windows'])}  action_mse={m['action_mse']:.6f}  "
+            f"mean_l2_full={m['mean_l2_full_chunk']:.6f}  mean_l2_step0={m['mean_l2_step0']:.6f}"
+        )
 
 
 if __name__ == "__main__":

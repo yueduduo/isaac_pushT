@@ -73,84 +73,51 @@ After collection is complete, you can use the `lerobot` visualization tool to vi
 python -m lerobot.scripts.lerobot_dataset_viz --repo-id isaac_pusht --root data/isaac_pusht --episode-index 0
 ```
 
-## Policy Training (Diffusion / Flow Matching)
+## Policy Training (LeRobot Diffusion)
 
-This project includes two Transformer-based policy learning algorithms:
+Training uses **`lerobot.policies.diffusion.DiffusionPolicy`** (1D conditional U-Net, SpatialSoftmax vision, `diffusers` DDPM schedule). There is **no** local `algo/` package; old Transformer+flatten checkpoints are **not** compatible.
 
-- **`diffusion`**: conditional diffusion policy (DDPM-style action noise prediction).
-- **`flow_matching`**: flow-matching (velocity-field) policy. Python package: `algo.flow_matching` (`FlowMatchingPolicy`, `FlowMatchingTrainer`, …). Checkpoints: `best_flow_matching.pt` / `last_flow_matching.pt`.
-
-Both algorithms use:
-
-- multimodal observations: `front image + back image + state`
-- a pretrained `ResNet18` image encoder
-- horizon-based action sequence modeling
-
-### 1. Train Diffusion Policy
-
-Training budget is **`--train-steps`** (number of `optimizer.step` calls), not epochs. Comparable “data passes” = `train_steps / steps_per_epoch`, where `steps_per_epoch = ceil(train_windows / batch_size)` (printed at startup).
+Training budget is **`--train-steps`** (number of `optimizer.step` calls). `horizon` must be divisible by `2 ** len(down_dims)` (default down_dims length 3 → multiple of 8).
 
 ```bash
-python scripts/train.py --algo diffusion --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --train-steps 5000 --batch-size 32 --device cuda
+python scripts/train.py --repo-id isaac_pusht --root data/isaac_pusht --horizon 32 --train-steps 5000 --batch-size 32 --device cuda
 ```
 
-### 2. Train Flow Matching Policy
+### JSON config (`scripts/configs`)
+
+- Example: [`scripts/configs/train_default.json`](scripts/configs/train_default.json)
+- Loader: `utils/train_config.py`
+- Sections: **`train`**, **`diffusion_trainer`** (maps into `DiffusionConfig` where keys match), optional **`lerobot_diffusion`** for further overrides.
 
 ```bash
-python scripts/train.py --algo flow_matching --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --train-steps 5000 --batch-size 32 --device cuda
+python scripts/train.py --config scripts/configs/train_default.json
 ```
 
-### 3. JSON training & model config (`scripts/configs`)
-
-Training hyperparameters and Transformer architecture (including the action head) can be loaded from **JSON** (`stdlib` `json`). The `train` section uses `train_steps`, `freeze_steps`, etc. (see template).
-
-- Example template: [`scripts/configs/train_default.json`](scripts/configs/train_default.json)
-- Loader and dataclasses: `utils/train_config.py`
-- Sections: `train`, `diffusion_model`, `flow_matching_model`, `diffusion_trainer`, `flow_matching_trainer`
+### Freeze RGB backbone (optional)
 
 ```bash
-python scripts/train.py --config scripts/configs/train_default.json --algo diffusion
+python scripts/train.py --horizon 32 --freeze-resnet --freeze-steps 500
 ```
 
-Command-line arguments override the `train` section of the JSON.
+### Resume (`--resume`)
 
-### 4. Freeze ResNet for Warmup (Optional)
-
-Freeze the ResNet18 backbone for the first **`freeze_steps`** optimizer steps, then unfreeze:
+Checkpoints are **`lerobot_diffusion`** format (`policy_type` + pickled `DiffusionConfig` + weights). Old `best_diffusion.pt` from the removed custom algo cannot be loaded.
 
 ```bash
-python scripts/train.py --algo diffusion --horizon 16 --freeze-resnet --freeze-steps 500
+python scripts/train.py --config scripts/configs/train_default.json --resume checkpoints/last_diffusion.pt --train-steps 2000
 ```
 
-### 5. Resume training (`--resume`)
-
-Use the **same** `--config` / CLI as a normal run (architecture and trainer hyperparameters must match the checkpoint). Checkpoints store **`step`** (completed global optimizer steps) and **`best_metric`**.
-
-```bash
-python scripts/train.py --config scripts/configs/train_default.json --algo diffusion --resume checkpoints/last_diffusion.pt --train-steps 2000
-```
-
-`--train-steps` is always **how many optimizer steps to run in this invocation**, starting from `saved_step + 1`. Legacy checkpoints with only `epoch` are converted with `completed_steps ≈ epoch * steps_per_epoch` using the **current** dataloader (approximate if batch or data changed).
-
-When a sidecar `*.norm.json` exists next to the resume checkpoint, normalization stats are loaded from it; otherwise they are recomputed from the current dataset.
+Sidecar `*.norm.json` behavior is unchanged.
 
 ## Policy Evaluation
 
 `scripts/eval.py` expects the repository root on `PYTHONPATH` (same as `scripts/train.py`).
 
-### 1. Evaluate Diffusion Checkpoint
-
 ```bash
-python scripts/eval.py --algo diffusion --ckpt checkpoints/best_diffusion.pt --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --device cuda
+python scripts/eval.py --ckpt checkpoints/best_diffusion.pt --repo-id isaac_pusht --root data/isaac_pusht --horizon 32 --device cuda
 ```
 
-### 2. Evaluate Flow Matching Checkpoint
-
-```bash
-python scripts/eval.py --algo flow_matching --ckpt checkpoints/best_flow_matching.pt --repo-id isaac_pusht --root data/isaac_pusht --horizon 16 --device cuda
-```
-
-**Migrating old runs:** checkpoints named `best_flow_mapping.pt` are from the previous naming; rename to `best_flow_matching.pt` or pass the old path as `--ckpt` (filename is arbitrary). The **state dict** must match a model built with the current `algo.flow_matching` architecture.
+`--horizon` must match the checkpoint training horizon.
 
 ## TensorBoard Visualization
 
@@ -159,8 +126,8 @@ python scripts/eval.py --algo flow_matching --ckpt checkpoints/best_flow_matchin
 TensorBoard is enabled by default for `scripts/train.py`. To turn it off or set a run name:
 
 ```bash
-python scripts/train.py --algo diffusion --horizon 16 --tb-logdir runs --tb-run-name diffusion_h16_exp1
-python scripts/train.py --algo diffusion --no-tensorboard
+python scripts/train.py --horizon 32 --tb-logdir runs --tb-run-name lerobot_dp_h32_exp1
+python scripts/train.py --no-tensorboard
 ```
 
 ### 2. Evaluation Metrics

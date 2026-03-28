@@ -8,8 +8,10 @@ import numpy as np
 import traceback
 from pathlib import Path
 
-# Add project root to sys.path
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_LERO_SRC = PROJECT_ROOT / "lerobot" / "src"
+if str(_LERO_SRC) not in sys.path:
+    sys.path.insert(0, str(_LERO_SRC))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
@@ -43,13 +45,8 @@ import isaaclab_tasks  # noqa: F401
 import isaac_pusht.tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
-# Algo imports
-from algo.diffusion.policy import DiffusionPolicy
-from algo.diffusion.trainer import DiffusionConfig
+from utils.lerobot_push_diffusion import PushTLerobotPolicyFacade, load_trainer_from_checkpoint
 from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats, normalize_state
-PROJECT_ROOT = Path(__file__).parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
 from utils.tcp_trajectory_viz import visualize_tcp_chunk_trajectory
 
 
@@ -75,19 +72,9 @@ def main():
     except Exception:
         debug_draw = None
     
-    # 2. 初始化 Policy
-    # 维度信息: state(21), action(horizon * 8)，单步动作为绝对 TCP 位姿 + gripper
-    state_dim = 21
+    # 2. 初始化 Policy（horizon * 8：单步动作为绝对 TCP 位姿 + gripper）
     action_dim_per_step = 8
-    
-    policy = DiffusionPolicy(
-        state_dim=state_dim, 
-        action_dim=args_cli.horizon * action_dim_per_step,
-        device=device,
-        diffusion_cfg=DiffusionConfig()
-    )
-    
-    # 加载权重
+
     ckpt_path = Path(args_cli.checkpoint)
     if not ckpt_path.exists():
         print(f"Error: Checkpoint not found at {ckpt_path}")
@@ -95,7 +82,13 @@ def main():
         return
 
     print(f"Loading checkpoint: {ckpt_path}")
-    policy.load(ckpt_path)
+    trainer, _, _ = load_trainer_from_checkpoint(
+        ckpt_path,
+        device=device,
+        lr=1e-4,
+        grad_clip_norm=1.0,
+    )
+    policy = PushTLerobotPolicyFacade(trainer)
     norm_path = ckpt_norm_path(ckpt_path)
     state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=device)
     
