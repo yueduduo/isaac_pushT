@@ -13,7 +13,7 @@
 
 ### 安装
 
-1. 安装 Isaac Lab
+1. 安装 Isaac Lab v2.3.2 or other v2.x.x 
 
 [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html)
 
