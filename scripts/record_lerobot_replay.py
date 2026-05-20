@@ -408,7 +408,10 @@ def main() -> None:
         replay_episode(env, dataset, ep_idx)
     except KeyboardInterrupt:
         print("[Replay] 被用户中断（Ctrl+C）。")
+    except Exception as e:
+        print(f"[Replay] 出现错误：{e}")
     finally:
+        print("[Replay] 关闭环境和应用。")
         env.close()
         simulation_app.close()
         cv2.destroyAllWindows()
