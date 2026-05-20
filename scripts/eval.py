@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from utils.dataset import DatasetConfig, build_dataloaders
+from utils.lerobot_processors import load_processor_bundle_for_checkpoint
 from utils.lerobot_push_diffusion import load_trainer_from_checkpoint
 
 try:
@@ -73,11 +74,25 @@ def main() -> None:
     if not ckpt_path.is_absolute():
         ckpt_path = PROJECT_ROOT / ckpt_path
 
+    trainer_probe, _, _ = load_trainer_from_checkpoint(
+        ckpt_path,
+        device=device,
+        lr=args.lr,
+        grad_clip_norm=args.grad_clip_norm,
+    )
+    processors = load_processor_bundle_for_checkpoint(
+        ckpt_path,
+        trainer_probe.config,
+        repo_id=args.repo_id,
+        root=args.root,
+        device=device,
+    )
     trainer, _, _ = load_trainer_from_checkpoint(
         ckpt_path,
         device=device,
         lr=args.lr,
         grad_clip_norm=args.grad_clip_norm,
+        processors=processors,
     )
 
     mse = evaluate_action_mse(trainer, val_loader)

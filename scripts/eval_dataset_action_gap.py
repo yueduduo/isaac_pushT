@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utils.dataset import DatasetConfig, build_dataloaders
 from utils.lerobot_push_diffusion import PushTLerobotTrainer, load_trainer_from_checkpoint
-from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats
+from utils.lerobot_processors import load_processor_bundle_for_checkpoint
 
 ACTION_DIM_PER_STEP = 8
 
@@ -67,8 +67,6 @@ def eval_split(
     num_samples: int,
     sample_steps: int,
     deterministic_sampling: bool,
-    action_mean: torch.Tensor,
-    action_std: torch.Tensor,
 ) -> dict[str, float]:
     if deterministic_sampling:
         print("[ActionGap] 提示：--deterministic-sampling 对 LeRobot DDPM 未实现零方差采样，结果仍含随机性。")
@@ -103,16 +101,14 @@ def eval_split(
                 acc = acc + trainer.sample_action_chunk_flat(obs, num_inference_steps=ninf)
             pred_flat = acc / float(num_samples)
 
-        pred_flat_raw = denormalize_action(pred_flat, action_mean, action_std)
-        gt_flat_raw = denormalize_action(gt_flat, action_mean, action_std)
-        diff = pred_flat_raw - gt_flat_raw
+        diff = pred_flat - gt_flat
         sum_sq += float((diff * diff).sum().item())
         total_elems += int(diff.numel())
 
         sum_l2 += float(torch.norm(diff, p=2, dim=1).sum().item())
-        pred_steps_raw = pred_flat_raw.view(bsz, horizon, ACTION_DIM_PER_STEP)
-        gt_steps_raw = gt_flat_raw.view(bsz, horizon, ACTION_DIM_PER_STEP)
-        sum_l20 += float(torch.norm(pred_steps_raw[:, 0, :] - gt_steps_raw[:, 0, :], p=2, dim=1).sum().item())
+        pred_steps = pred_flat.view(bsz, horizon, ACTION_DIM_PER_STEP)
+        gt_steps = gt_flat.view(bsz, horizon, ACTION_DIM_PER_STEP)
+        sum_l20 += float(torch.norm(pred_steps[:, 0, :] - gt_steps[:, 0, :], p=2, dim=1).sum().item())
         total_windows += bsz
 
     if total_windows == 0 or total_elems == 0:
@@ -139,8 +135,6 @@ def main() -> None:
     if not ckpt_path.is_absolute():
         ckpt_path = PROJECT_ROOT / ckpt_path
 
-    state_mean, state_std, action_mean, action_std = load_norm_stats(ckpt_norm_path(ckpt_path), device=device)
-
     dataset_cfg = DatasetConfig(
         repo_id=args.repo_id,
         root=args.root,
@@ -155,16 +149,26 @@ def main() -> None:
         device=device,
         val_split=True,
     )
-    train_ds = train_loader.dataset
-    while hasattr(train_ds, "dataset"):
-        train_ds = train_ds.dataset
-    train_ds.set_normalization_stats(state_mean, state_std, action_mean, action_std)
 
+    trainer_probe, _, _ = load_trainer_from_checkpoint(
+        ckpt_path,
+        device=device,
+        lr=args.lr,
+        grad_clip_norm=args.grad_clip_norm,
+    )
+    processors = load_processor_bundle_for_checkpoint(
+        ckpt_path,
+        trainer_probe.config,
+        repo_id=args.repo_id,
+        root=args.root,
+        device=device,
+    )
     trainer, _, _ = load_trainer_from_checkpoint(
         ckpt_path,
         device=device,
         lr=args.lr,
         grad_clip_norm=args.grad_clip_norm,
+        processors=processors,
     )
 
     print(
@@ -181,13 +185,8 @@ def main() -> None:
             num_samples=args.num_samples,
             sample_steps=args.sample_steps,
             deterministic_sampling=args.deterministic_sampling,
-            action_mean=action_mean,
-            action_std=action_std,
         )
-        print(
-            f"[ActionGap] TRAIN  windows={int(m['num_windows'])}  action_mse={m['action_mse']:.6f}  "
-            f"mean_l2_full={m['mean_l2_full_chunk']:.6f}  mean_l2_step0={m['mean_l2_step0']:.6f}"
-        )
+        print(f"[ActionGap][train] {m}")
 
     if args.split in ("val", "both"):
         m = eval_split(
@@ -198,13 +197,8 @@ def main() -> None:
             num_samples=args.num_samples,
             sample_steps=args.sample_steps,
             deterministic_sampling=args.deterministic_sampling,
-            action_mean=action_mean,
-            action_std=action_std,
         )
-        print(
-            f"[ActionGap] VAL    windows={int(m['num_windows'])}  action_mse={m['action_mse']:.6f}  "
-            f"mean_l2_full={m['mean_l2_full_chunk']:.6f}  mean_l2_step0={m['mean_l2_step0']:.6f}"
-        )
+        print(f"[ActionGap][val] {m}")
 
 
 if __name__ == "__main__":

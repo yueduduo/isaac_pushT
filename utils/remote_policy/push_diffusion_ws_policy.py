@@ -10,15 +10,13 @@ import torch
 
 from utils.dataset import STATE_KEY, TOP_CAMERA_KEY, WRIST_CAMERA_KEY
 from utils.lerobot_push_diffusion import PushTLerobotTrainer, ensure_batched_obs
-from utils.normalization import denormalize_action, normalize_state
 from utils.remote_policy.websocket_client import WebsocketClientPolicy
 
 
 class PushDiffusionWebsocketServicer:
     """
-    接收未归一化的观测（与 eval / 数据集一致），在服务端完成归一化、推理、动作反归一化。
-    输入 obs 键：WRIST_CAMERA_KEY / TOP_CAMERA_KEY（float32 CHW [0,1]）、STATE_KEY（float32 21 维物理状态）。
-    返回 {"flat_action": (horizon * action_dim,) float32}，已为物理空间动作。
+    接收未归一化的观测（与 eval / 数据集一致），在服务端用 LeRobot Normalizer 预处理、
+    推理后再 Unnormalizer 反归一化动作。
     """
 
     def __init__(
@@ -26,19 +24,11 @@ class PushDiffusionWebsocketServicer:
         trainer: PushTLerobotTrainer,
         *,
         device: torch.device,
-        state_mean: torch.Tensor,
-        state_std: torch.Tensor,
-        action_mean: torch.Tensor,
-        action_std: torch.Tensor,
         horizon: int,
         action_dim_per_step: int,
     ) -> None:
         self._trainer = trainer
         self._device = device
-        self._state_mean = state_mean
-        self._state_std = state_std
-        self._action_mean = action_mean
-        self._action_std = action_std
         self._horizon = horizon
         self._action_dim_per_step = action_dim_per_step
 
@@ -46,7 +36,6 @@ class PushDiffusionWebsocketServicer:
         wrist = torch.from_numpy(obs[WRIST_CAMERA_KEY]).to(self._device, dtype=torch.float32)
         top_cam = torch.from_numpy(obs[TOP_CAMERA_KEY]).to(self._device, dtype=torch.float32)
         state = torch.from_numpy(obs[STATE_KEY]).to(self._device, dtype=torch.float32).reshape(-1)
-        state = normalize_state(state, self._state_mean, self._state_std)
         obs_dict = ensure_batched_obs(
             {
                 WRIST_CAMERA_KEY: wrist,
@@ -56,9 +45,7 @@ class PushDiffusionWebsocketServicer:
         )
         with torch.no_grad():
             flat = self._trainer.sample_action_chunk_flat(obs_dict).squeeze(0)
-            seq = flat.view(self._horizon, self._action_dim_per_step)
-            seq = denormalize_action(seq, self._action_mean, self._action_std)
-        flat_np = seq.reshape(-1).detach().cpu().numpy().astype(np.float32)
+        flat_np = flat.detach().cpu().numpy().astype(np.float32)
         return {"flat_action": flat_np}
 
 
@@ -88,4 +75,5 @@ def build_server_metadata(*, horizon: int, action_dim_per_step: int, checkpoint:
         "action_dim_per_step": action_dim_per_step,
         "checkpoint": str(checkpoint.resolve()),
         "observation_keys": [WRIST_CAMERA_KEY, TOP_CAMERA_KEY, STATE_KEY],
+        "normalization": "lerobot_normalizer_processor",
     }

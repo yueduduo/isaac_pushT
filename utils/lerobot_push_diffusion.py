@@ -11,6 +11,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 from torch.optim import AdamW
 
 # 必须在 import lerobot 之前注入 vendored 源码路径，并 stub policies 包
@@ -31,6 +32,7 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 from utils.dataset import STATE_KEY, TOP_CAMERA_KEY, WRIST_CAMERA_KEY
+from utils.lerobot_processors import PushTProcessorBundle
 
 # 与 build_push_diffusion_config 中 input_features 的 VISUAL 键顺序一致
 IMAGE_KEYS: tuple[str, ...] = (WRIST_CAMERA_KEY, TOP_CAMERA_KEY)
@@ -153,6 +155,10 @@ def set_rgb_backbone_trainable(policy: DiffusionPolicy, trainable: bool) -> None
             p.requires_grad = trainable
 
 
+def split_obs_from_flat(flat: dict[str, Tensor]) -> dict[str, Tensor]:
+    return {key: flat[key] for key in IMAGE_KEYS + (STATE_KEY,)}
+
+
 def ensure_batched_obs(obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """state (D,) → (1,D)；图像 (3,H,W) → (1,3,H,W)。"""
     out = dict(obs)
@@ -189,9 +195,11 @@ class PushTLerobotTrainer:
         lr: float,
         grad_clip_norm: float,
         weight_decay: float | None = None,
+        processors: PushTProcessorBundle | None = None,
     ):
         self.policy = policy.to(device)
         self.device = device
+        self.processors = processors
         self.grad_clip_norm = grad_clip_norm
         wd = policy.config.optimizer_weight_decay if weight_decay is None else weight_decay
         betas = tuple(policy.config.optimizer_betas)
@@ -207,13 +215,26 @@ class PushTLerobotTrainer:
     def config(self) -> DiffusionConfig:
         return self.policy.config
 
-    def train_step(self, batch: dict[str, Any]) -> float:
-        self.policy.train()
-        lb = dataset_batch_to_lerobot(
+    def _collate_to_lerobot(self, batch: dict[str, Any]) -> dict[str, Tensor]:
+        if self.processors is not None:
+            norm_flat = self.processors.preprocess_training_batch(batch)
+            return dataset_batch_to_lerobot(
+                {
+                    "obs": split_obs_from_flat(norm_flat),
+                    "action": norm_flat[ACTION],
+                },
+                self.config.horizon,
+                self.config.n_obs_steps,
+            )
+        return dataset_batch_to_lerobot(
             batch,
             self.config.horizon,
             self.config.n_obs_steps,
         )
+
+    def train_step(self, batch: dict[str, Any]) -> float:
+        self.policy.train()
+        lb = self._collate_to_lerobot(batch)
         self.optimizer.zero_grad(set_to_none=True)
         loss, _ = self.policy.forward(lb)
         loss.backward()
@@ -225,11 +246,7 @@ class PushTLerobotTrainer:
     @torch.no_grad()
     def eval_loss(self, batch: dict[str, Any]) -> float:
         self.policy.eval()
-        lb = dataset_batch_to_lerobot(
-            batch,
-            self.config.horizon,
-            self.config.n_obs_steps,
-        )
+        lb = self._collate_to_lerobot(batch)
         loss, _ = self.policy.forward(lb)
         return float(loss.item())
 
@@ -244,11 +261,19 @@ class PushTLerobotTrainer:
         self.policy.eval()
         if num_inference_steps is not None:
             self.policy.diffusion.num_inference_steps = int(num_inference_steps)
-        obs_dev = {k: v.to(self.device) for k, v in obs.items()}
-        gb = _obs_batch_for_generate(self.policy, obs_dev)
+        if self.processors is not None:
+            obs_dev = {k: v.to(self.device) for k, v in obs.items()}
+            obs_norm = self.processors.preprocess_observation(obs_dev)
+            gb = _obs_batch_for_generate(self.policy, obs_norm)
+        else:
+            obs_dev = {k: v.to(self.device) for k, v in obs.items()}
+            gb = _obs_batch_for_generate(self.policy, obs_dev)
         pred = self.policy.diffusion.generate_actions(gb, noise=None)
         bsz = pred.shape[0]
-        return pred.reshape(bsz, -1)
+        flat = pred.reshape(bsz, -1)
+        if self.processors is not None:
+            flat = self.processors.postprocess_action(flat)
+        return flat
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -282,8 +307,9 @@ def load_trainer_from_checkpoint(
     device: torch.device,
     lr: float,
     grad_clip_norm: float,
+    processors: PushTProcessorBundle | None = None,
 ) -> tuple[PushTLerobotTrainer, int, float]:
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     if ckpt.get("policy_type") != "lerobot_diffusion":
         raise ValueError(
             "该 checkpoint 不是 lerobot_diffusion 格式；"
@@ -294,7 +320,11 @@ def load_trainer_from_checkpoint(
     policy = DiffusionPolicy(cfg).to(device)
     policy.load_state_dict(ckpt["policy_state_dict"], strict=True)
     trainer = PushTLerobotTrainer(
-        policy, device=device, lr=lr, grad_clip_norm=grad_clip_norm
+        policy,
+        device=device,
+        lr=lr,
+        grad_clip_norm=grad_clip_norm,
+        processors=processors,
     )
     trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     for g in trainer.optimizer.param_groups:

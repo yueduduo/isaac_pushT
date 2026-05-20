@@ -44,11 +44,6 @@ class LeRobotPushTDataset(Dataset):
         self.cfg = cfg
         self.device = device
         self.dataset = LeRobotDataset(repo_id=cfg.repo_id, root=Path(cfg.root))
-        self.state_mean: torch.Tensor | None = None
-        self.state_std: torch.Tensor | None = None
-        self.action_mean: torch.Tensor | None = None
-        self.action_std: torch.Tensor | None = None
-        
         # [优化1] 预加载所有状态和动作 (使用 .clone() 彻底断开磁盘映射句柄)
         num_frames = len(self.dataset.hf_dataset)
         print(f"[Dataset] Loading numerical data ({num_frames} frames)...")
@@ -71,18 +66,6 @@ class LeRobotPushTDataset(Dataset):
         del self.dataset
         import gc
         gc.collect()
-
-    def set_normalization_stats(
-        self,
-        state_mean: torch.Tensor,
-        state_std: torch.Tensor,
-        action_mean: torch.Tensor,
-        action_std: torch.Tensor,
-    ) -> None:
-        self.state_mean = state_mean.detach().cpu().float().clone()
-        self.state_std = state_std.detach().cpu().float().clone()
-        self.action_mean = action_mean.detach().cpu().float().clone()
-        self.action_std = action_std.detach().cpu().float().clone()
 
     def __len__(self) -> int:
         return len(self.valid_start_indices)
@@ -171,11 +154,7 @@ class LeRobotPushTDataset(Dataset):
         offsets = torch.arange(self.cfg.horizon, device=sample_indices.device)
         action_batch = self.all_actions[sample_indices.unsqueeze(1) + offsets]
         state_batch = self.all_states[sample_indices]
-        if self.state_mean is not None and self.state_std is not None:
-            state_batch = (state_batch - self.state_mean) / self.state_std
-        if self.action_mean is not None and self.action_std is not None:
-            action_batch = (action_batch - self.action_mean.view(1, 1, -1)) / self.action_std.view(1, 1, -1)
-        
+
         # 2. 在返回前立即 to(device)，将 CPU 压力释放给异步 DMA
         dev = self.device
         return {

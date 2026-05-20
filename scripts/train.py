@@ -25,19 +25,24 @@ stub_lerobot_policies_packages(PROJECT_ROOT)
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
 from utils.dataset import DatasetConfig, build_dataloaders
+from utils.dataset_on_demand import (
+    OnDemandDatasetConfig,
+    build_on_demand_dataloaders,
+    move_batch_to_device,
+)
+from utils.lerobot_processors import (
+    build_processor_bundle,
+    load_dataset_stats,
+    load_processor_bundle_for_checkpoint,
+    processor_stats_path,
+    save_processor_stats_for_checkpoint,
+)
 from utils.lerobot_push_diffusion import (
     PushTLerobotTrainer,
     build_push_diffusion_config,
     load_trainer_from_checkpoint,
     save_checkpoint,
     set_rgb_backbone_trainable,
-)
-from utils.normalization import (
-    ckpt_norm_path,
-    compute_state_action_stats,
-    denormalize_action,
-    load_norm_stats,
-    save_norm_stats,
 )
 from utils.train_config import (
     RunBundle,
@@ -102,6 +107,25 @@ def parse_args() -> tuple[argparse.Namespace, RunBundle]:
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--grad-clip-norm", type=float, dest="grad_clip_norm")
     parser.add_argument("--optimizer-weight-decay", type=float, dest="optimizer_weight_decay")
+    od_grp = parser.add_mutually_exclusive_group()
+    od_grp.add_argument(
+        "--on-demand-dataset",
+        dest="on_demand_dataset",
+        action="store_true",
+        help="图像按需从磁盘加载（默认）。",
+    )
+    od_grp.add_argument(
+        "--preload-dataset",
+        dest="on_demand_dataset",
+        action="store_false",
+        help="整库 preload 图像到内存（旧行为，占大量 RAM）。",
+    )
+    parser.add_argument(
+        "--io-workers",
+        type=int,
+        dest="io_workers",
+        help="按需模式且 num_workers=0 时，单样本内读图线程数。",
+    )
 
     args = parser.parse_args(remaining)
     train = train_params_from_namespace(args)
@@ -110,11 +134,21 @@ def parse_args() -> tuple[argparse.Namespace, RunBundle]:
 
 
 @torch.no_grad()
-def evaluate_diffusion(trainer: PushTLerobotTrainer, dataloader: torch.utils.data.DataLoader) -> float:
+def evaluate_diffusion(
+    trainer: PushTLerobotTrainer,
+    dataloader: torch.utils.data.DataLoader,
+    *,
+    move_to_device: bool = False,
+    device: torch.device | None = None,
+) -> float:
     trainer.policy.eval()
     losses: list[float] = []
     pbar = tqdm(dataloader, desc="  Validating", leave=False, mininterval=1.0)
     for batch in pbar:
+        if move_to_device:
+            if device is None:
+                raise ValueError("move_to_device=True 时需要传入 device。")
+            batch = move_batch_to_device(batch, device)
         loss_val = trainer.eval_loss(batch)
         losses.append(loss_val)
         pbar.set_postfix(loss=f"{loss_val:.4f}")
@@ -126,21 +160,24 @@ def evaluate_action_mse(
     trainer: PushTLerobotTrainer,
     dataloader: torch.utils.data.DataLoader,
     max_batches: int,
-    action_mean: torch.Tensor,
-    action_std: torch.Tensor,
+    *,
+    move_to_device: bool = False,
+    device: torch.device | None = None,
 ) -> float:
     errors: list[float] = []
     for i, batch in enumerate(dataloader):
         if max_batches > 0 and i >= max_batches:
             break
+        if move_to_device:
+            if device is None:
+                raise ValueError("move_to_device=True 时需要传入 device。")
+            batch = move_batch_to_device(batch, device)
         obs = batch["obs"]
         gt_action = batch["action"]
         if gt_action.dim() > 2:
             gt_action = gt_action.reshape(gt_action.shape[0], -1)
         pred_action = trainer.sample_action_chunk_flat(obs)
-        pred_action_raw = denormalize_action(pred_action, action_mean, action_std)
-        gt_action_raw = denormalize_action(gt_action, action_mean, action_std)
-        errors.append(F.mse_loss(pred_action_raw, gt_action_raw).item())
+        errors.append(F.mse_loss(pred_action, gt_action).item())
     return float(sum(errors) / max(len(errors), 1))
 
 
@@ -160,17 +197,38 @@ def main() -> None:
         raise ValueError("--freeze-steps 不能为负。")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    dataset_cfg = DatasetConfig(repo_id=args.repo_id, root=args.root, horizon=args.horizon, preload_in_memory=True)
-    train_loader, val_loader = build_dataloaders(
-        dataset_cfg,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        train_ratio=args.train_ratio,
-        device=device,
-        split_by_episode=not args.random_window_split,
-        val_split=args.val_split,
-        split_seed=args.split_seed,
-    )
+    if args.on_demand_dataset:
+        on_demand_cfg = OnDemandDatasetConfig(
+            repo_id=args.repo_id,
+            root=args.root,
+            horizon=args.horizon,
+            io_workers=args.io_workers,
+        )
+        train_loader, val_loader = build_on_demand_dataloaders(
+            on_demand_cfg,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            train_ratio=args.train_ratio,
+            device=device,
+            split_by_episode=not args.random_window_split,
+            val_split=args.val_split,
+            split_seed=args.split_seed,
+        )
+    else:
+        dataset_cfg = DatasetConfig(
+            repo_id=args.repo_id, root=args.root, horizon=args.horizon, preload_in_memory=True
+        )
+        train_loader, val_loader = build_dataloaders(
+            dataset_cfg,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            train_ratio=args.train_ratio,
+            device=device,
+            split_by_episode=not args.random_window_split,
+            val_split=args.val_split,
+            split_seed=args.split_seed,
+        )
+    use_cpu_collate = args.on_demand_dataset and args.num_workers > 0
     use_val = val_loader is not None
     use_action_mse = args.action_mse
     steps_per_epoch = len(train_loader)
@@ -185,7 +243,13 @@ def main() -> None:
 
     state_dim = int(actual_ds.all_states.shape[-1])
     action_dim_per_step = int(actual_ds.all_actions.shape[-1])
-    chw = tuple(int(x) for x in actual_ds.all_wrist_camera_images.shape[1:4])
+    if hasattr(actual_ds, "image_chw"):
+        chw = tuple(int(x) for x in actual_ds.image_chw)
+    else:
+        chw = tuple(int(x) for x in actual_ds.all_wrist_camera_images.shape[1:4])
+
+    dataset_stats = load_dataset_stats(args.repo_id, args.root)
+    print("[Init] Loaded dataset.meta.stats for LeRobot NormalizerProcessorStep.")
 
     resume_path: Path | None = None
     if args.resume:
@@ -201,29 +265,6 @@ def main() -> None:
     torch.cuda.empty_cache()
 
     print(f"[Init] state_dim={state_dim} action_dim_per_step={action_dim_per_step} horizon={args.horizon} image_chw={chw}")
-
-    if resume_path is not None:
-        norm_sidecar = ckpt_norm_path(resume_path)
-        if norm_sidecar.is_file():
-            state_mean, state_std, action_mean, action_std = load_norm_stats(norm_sidecar, device=None)
-            print(f"[Init] Loaded normalization from {norm_sidecar}")
-        else:
-            state_mean, state_std, action_mean, action_std = compute_state_action_stats(
-                actual_ds.all_states, actual_ds.all_actions
-            )
-            print("[Init] 续训 checkpoint 旁无 .norm.json，已用当前数据集计算归一化。")
-    else:
-        state_mean, state_std, action_mean, action_std = compute_state_action_stats(
-            actual_ds.all_states, actual_ds.all_actions
-        )
-    actual_ds.set_normalization_stats(state_mean, state_std, action_mean, action_std)
-    if use_action_mse:
-        action_mean_dev = action_mean.to(device)
-        action_std_dev = action_std.to(device)
-    else:
-        action_mean_dev = None
-        action_std_dev = None
-    print("[Init] Enabled state/action normalization for training data pipeline.")
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -244,6 +285,31 @@ def main() -> None:
         num_train_timesteps=args.diffusion_steps,
         overrides=overrides,
     )
+    if resume_path is not None:
+        processors = load_processor_bundle_for_checkpoint(
+            resume_path,
+            diff_cfg,
+            repo_id=args.repo_id,
+            root=args.root,
+            device=device,
+        )
+        print(f"[Init] Loaded processor stats from {processor_stats_path(resume_path)} or dataset.")
+    else:
+        processors = build_processor_bundle(
+            diff_cfg,
+            repo_id=args.repo_id,
+            root=args.root,
+            device=device,
+            stats=dataset_stats,
+        )
+    norm_eps = next(
+        (step.eps for step in processors.preprocessor.steps if hasattr(step, "eps")),
+        None,
+    )
+    print(
+        "[Init] LeRobot NormalizerProcessorStep: VISUAL=MEAN_STD, STATE=MIN_MAX, ACTION=MIN_MAX"
+        + (f" (eps={norm_eps})" if norm_eps is not None else "")
+    )
 
     grad_clip = float(args.grad_clip_norm)
     wd = args.optimizer_weight_decay
@@ -254,6 +320,7 @@ def main() -> None:
             device=device,
             lr=args.lr,
             grad_clip_norm=grad_clip,
+            processors=processors,
         )
         for g in trainer.optimizer.param_groups:
             g["lr"] = args.lr
@@ -269,6 +336,7 @@ def main() -> None:
             lr=args.lr,
             grad_clip_norm=grad_clip,
             weight_decay=wd,
+            processors=processors,
         )
 
     if args.freeze_resnet and args.freeze_steps > 0 and start_step < args.freeze_steps:
@@ -330,6 +398,8 @@ def main() -> None:
             if device.type == "cuda" and next_completed == start_step + 1:
                 torch.cuda.synchronize()
 
+            if use_cpu_collate:
+                batch = move_batch_to_device(batch, device)
             t0 = time.time()
             loss_val = trainer.train_step(batch)
             seg_train_sec += time.time() - t0
@@ -347,16 +417,26 @@ def main() -> None:
             segment_losses.clear()
             t_ev0 = time.time()
             if use_val:
-                val_loss = evaluate_diffusion(trainer, val_loader)
+                val_loss = evaluate_diffusion(
+                    trainer, val_loader, move_to_device=use_cpu_collate, device=device
+                )
             else:
                 val_loss = None
-            if use_action_mse and action_mean_dev is not None and action_std_dev is not None:
+            if use_action_mse:
                 train_action_mse = evaluate_action_mse(
-                    trainer, train_loader, args.action_mse_batches, action_mean_dev, action_std_dev
+                    trainer,
+                    train_loader,
+                    args.action_mse_batches,
+                    move_to_device=use_cpu_collate,
+                    device=device,
                 )
                 val_action_mse = (
                     evaluate_action_mse(
-                        trainer, val_loader, args.action_mse_batches, action_mean_dev, action_std_dev
+                        trainer,
+                        val_loader,
+                        args.action_mse_batches,
+                        move_to_device=use_cpu_collate,
+                        device=device,
                     )
                     if use_val
                     else None
@@ -395,21 +475,9 @@ def main() -> None:
                     step=completed,
                     best_metric=best_metric,
                 )
-                save_norm_stats(
-                    ckpt_norm_path(best_ckpt_path),
-                    state_mean=state_mean,
-                    state_std=state_std,
-                    action_mean=action_mean,
-                    action_std=action_std,
-                )
+                save_processor_stats_for_checkpoint(best_ckpt_path, dataset_stats)
             save_checkpoint(last_ckpt_path, trainer, step=completed, best_metric=best_metric)
-            save_norm_stats(
-                ckpt_norm_path(last_ckpt_path),
-                state_mean=state_mean,
-                state_std=state_std,
-                action_mean=action_mean,
-                action_std=action_std,
-            )
+            save_processor_stats_for_checkpoint(last_ckpt_path, dataset_stats)
 
     pbar.close()
 

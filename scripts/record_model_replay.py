@@ -146,7 +146,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.lerobot_push_diffusion import PushTLerobotPolicyFacade, load_trainer_from_checkpoint
 from utils.remote_policy import RemotePushDiffusionPolicy
 from utils.dataset import STATE_KEY, TOP_CAMERA_KEY, WRIST_CAMERA_KEY
-from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats, normalize_state
+from utils.lerobot_processors import load_processor_bundle_for_checkpoint
 from utils.tcp_trajectory_viz import visualize_tcp_chunk_trajectory
 
 try:
@@ -300,36 +300,9 @@ def policy_obs_raw_from_dataset_frame(frame: dict, device: torch.device) -> dict
     }
 
 
-def policy_obs_from_dataset_frame(
-    frame: dict,
-    device: torch.device,
-    state_mean: torch.Tensor,
-    state_std: torch.Tensor,
-) -> dict[str, torch.Tensor]:
-    """
-    构造 policy.act 的观测字典（与训练 collate / eval 中键名一致）。
-
-    图像与 observation.state **必须且仅能**来自本参数「数据集的一行」；
-    禁止传入 read_state(env) 或仿真传感器拼出的状态向量。
-    """
-    wrist = frame[WRIST_CAMERA_KEY].detach().to(device=device, dtype=torch.float32)
-    top_cam = frame[TOP_CAMERA_KEY].detach().to(device=device, dtype=torch.float32)
-    state = frame[STATE_KEY].detach().to(device=device, dtype=torch.float32).reshape(-1)
-    if state.numel() != STATE_DIM:
-        raise ValueError(
-            f"数据集 {STATE_KEY} 长度 {state.numel()} ≠ 期望 STATE_DIM={STATE_DIM}"
-        )
-    state = normalize_state(state, state_mean, state_std)
-    return {
-        WRIST_CAMERA_KEY: wrist,
-        TOP_CAMERA_KEY: top_cam,
-        STATE_KEY: state,
-    }
-
-
 def load_policy(
     policy_device: torch.device,
-) -> tuple[PushTLerobotPolicyFacade, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> PushTLerobotPolicyFacade:
     ckpt_path = Path(args_cli.checkpoint)
     if not ckpt_path.is_absolute():
         ckpt_path = PROJECT_ROOT / ckpt_path
@@ -338,16 +311,27 @@ def load_policy(
         simulation_app.close()
         sys.exit(1)
     print(f"[ModelReplay] 加载权重：{ckpt_path}（horizon={args_cli.horizon}）")
-    trainer, _, _ = load_trainer_from_checkpoint(
+    trainer_probe, _, _ = load_trainer_from_checkpoint(
         ckpt_path,
         device=policy_device,
         lr=1e-4,
         grad_clip_norm=1.0,
     )
-    policy = PushTLerobotPolicyFacade(trainer)
-    norm_path = ckpt_norm_path(ckpt_path)
-    state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=policy_device)
-    return policy, state_mean, state_std, action_mean, action_std
+    processors = load_processor_bundle_for_checkpoint(
+        ckpt_path,
+        trainer_probe.config,
+        repo_id=args_cli.repo_id,
+        root=args_cli.root if args_cli.root is not None else PROJECT_ROOT / "data" / args_cli.repo_id,
+        device=policy_device,
+    )
+    trainer, _, _ = load_trainer_from_checkpoint(
+        ckpt_path,
+        device=policy_device,
+        lr=1e-4,
+        grad_clip_norm=1.0,
+        processors=processors,
+    )
+    return PushTLerobotPolicyFacade(trainer)
 
 
 def show_cameras(frame: dict) -> bool:
@@ -423,10 +407,6 @@ def replay_episode(
     ep_idx: int,
     policy: PushTLerobotPolicyFacade | RemotePushDiffusionPolicy,
     policy_device: torch.device,
-    state_mean: torch.Tensor | None,
-    state_std: torch.Tensor | None,
-    action_mean: torch.Tensor | None,
-    action_std: torch.Tensor | None,
 ) -> None:
     """
     用数据集图像 + observation.state 驱动扩散策略，将预测动作送入仿真逐步执行。
@@ -437,15 +417,6 @@ def replay_episode(
       3. 运行 tcp_align_steps 步使 TCP 收敛到初始位姿
       4. 每隔至多 action_steps：用当前帧数据集观测推理 → 执行动作子序列 → 与 next_state 比对
     """
-    if not isinstance(policy, RemotePushDiffusionPolicy):
-        if (
-            state_mean is None
-            or state_std is None
-            or action_mean is None
-            or action_std is None
-        ):
-            raise ValueError("本地 PushTLerobotPolicyFacade 需要 state_mean/state_std/action_mean/action_std。")
-
     episodes  = dataset.meta.episodes
     ep_info   = episodes[ep_idx]
     frame_ids = list(range(ep_info["dataset_from_index"], ep_info["dataset_to_index"]))
@@ -481,15 +452,10 @@ def replay_episode(
             frame = dataset[abs_frame_idx]
             if isinstance(policy, RemotePushDiffusionPolicy):
                 obs_dict = policy_obs_raw_from_dataset_frame(frame, torch.device("cpu"))
-                flat_action = policy.act(obs_dict)
-                action_seq = flat_action.view(args_cli.horizon, ACTION_DIM)
             else:
-                obs_dict = policy_obs_from_dataset_frame(
-                    frame, policy_device, state_mean, state_std
-                )
-                flat_action = policy.act(obs_dict)
-                action_seq = flat_action.view(args_cli.horizon, ACTION_DIM)
-                action_seq = denormalize_action(action_seq, action_mean, action_std)
+                obs_dict = policy_obs_raw_from_dataset_frame(frame, policy_device)
+            flat_action = policy.act(obs_dict)
+            action_seq = flat_action.view(args_cli.horizon, ACTION_DIM)
             if action_seq.shape[-1] != ACTION_DIM:
                 raise ValueError(
                     f"[ModelReplay] 模型输出动作维度异常: got={action_seq.shape[-1]}, expected={ACTION_DIM}"
@@ -582,9 +548,8 @@ def main() -> None:
             out_device=policy_device,
         )
         print(f"[ModelReplay] 远端策略元数据: {policy.server_metadata}")
-        state_mean = state_std = action_mean = action_std = None
     else:
-        policy, state_mean, state_std, action_mean, action_std = load_policy(policy_device)
+        policy = load_policy(policy_device)
 
     env = make_env()
     try:
@@ -594,10 +559,6 @@ def main() -> None:
             ep_idx,
             policy,
             policy_device,
-            state_mean,
-            state_std,
-            action_mean,
-            action_std,
         )
     except KeyboardInterrupt:
         print("[Replay] 被用户中断（Ctrl+C）。")

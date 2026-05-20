@@ -27,7 +27,7 @@ class TrainRunParams:
     train_steps: int = 5000
     batch_size: int = 32
     lr: float = 1e-4
-    num_workers: int = 0
+    num_workers: int = 12
     device: str = "cuda"
     save_dir: str = "checkpoints"
     diffusion_steps: int = 100
@@ -47,6 +47,8 @@ class TrainRunParams:
     train_ratio: float = 0.95
     split_seed: int = 42
     resume: str | None = None
+    on_demand_dataset: bool = True
+    io_workers: int = 8
 
 
 @dataclass

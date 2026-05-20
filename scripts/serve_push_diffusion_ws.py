@@ -25,7 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from utils.lerobot_push_diffusion import load_trainer_from_checkpoint
-from utils.normalization import ckpt_norm_path, load_norm_stats
+from utils.lerobot_processors import load_processor_bundle_for_checkpoint
 from utils.remote_policy.push_diffusion_ws_policy import (
     PushDiffusionWebsocketServicer,
     build_server_metadata,
@@ -41,6 +41,8 @@ def main() -> None:
         default="checkpoints/best_diffusion.pt",
         help="与训练一致的 .pt 权重。",
     )
+    parser.add_argument("--repo-id", type=str, default="isaac_pusht")
+    parser.add_argument("--root", type=str, default="data/isaac_pusht")
     parser.add_argument("--horizon", type=int, default=32, help="与 checkpoint 内 horizon 一致。")
     parser.add_argument(
         "--action-dim-per-step",
@@ -74,22 +76,30 @@ def main() -> None:
         device = torch.device(args.device)
 
     logging.info("加载权重: %s device=%s", ckpt_path, device)
-    trainer, _, _ = load_trainer_from_checkpoint(
+    trainer_probe, _, _ = load_trainer_from_checkpoint(
         ckpt_path,
         device=device,
         lr=1e-4,
         grad_clip_norm=1.0,
     )
-    norm_path = ckpt_norm_path(ckpt_path)
-    state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=device)
+    processors = load_processor_bundle_for_checkpoint(
+        ckpt_path,
+        trainer_probe.config,
+        repo_id=args.repo_id,
+        root=args.root,
+        device=device,
+    )
+    trainer, _, _ = load_trainer_from_checkpoint(
+        ckpt_path,
+        device=device,
+        lr=1e-4,
+        grad_clip_norm=1.0,
+        processors=processors,
+    )
 
     servicer = PushDiffusionWebsocketServicer(
         trainer,
         device=device,
-        state_mean=state_mean,
-        state_std=state_std,
-        action_mean=action_mean,
-        action_std=action_std,
         horizon=args.horizon,
         action_dim_per_step=args.action_dim_per_step,
     )

@@ -80,3 +80,4 @@ data/
 **/*.pt
 checkpoints/
 lerobot
+log.md

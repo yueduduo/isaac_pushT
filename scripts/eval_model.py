@@ -39,6 +39,8 @@ parser.add_argument(
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate")
 parser.add_argument("--max_steps", type=int, default=400, help="Max steps per episode (timeout)")
 parser.add_argument("--horizon", type=int, default=32, help="Temporal horizon used during training")
+parser.add_argument("--repo-id", type=str, default="isaac_pusht")
+parser.add_argument("--root", type=str, default="data/isaac_pusht")
 parser.add_argument("--action-steps", type=int, default=32, help="Number of action steps to execute per inference")
 parser.add_argument("--debug-draw", action="store_true", help="Enable debug draw for visualizing TCP future positions")
 
@@ -61,7 +63,7 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 from utils.dataset import TOP_CAMERA_KEY, WRIST_CAMERA_KEY
 from utils.lerobot_push_diffusion import PushTLerobotPolicyFacade, load_trainer_from_checkpoint
-from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats, normalize_state
+from utils.lerobot_processors import load_processor_bundle_for_checkpoint
 from utils.remote_policy import RemotePushDiffusionPolicy
 from utils.tcp_trajectory_viz import visualize_tcp_chunk_trajectory
 
@@ -101,7 +103,6 @@ def main():
             out_device=device,
         )
         print(f"Remote policy server metadata: {policy.server_metadata}")
-        state_mean = state_std = action_mean = action_std = None
     else:
         ckpt_path = Path(args_cli.checkpoint)
         if not ckpt_path.exists():
@@ -110,15 +111,27 @@ def main():
             return
 
         print(f"Loading checkpoint: {ckpt_path}")
-        trainer, _, _ = load_trainer_from_checkpoint(
+        trainer_probe, _, _ = load_trainer_from_checkpoint(
             ckpt_path,
             device=device,
             lr=1e-4,
             grad_clip_norm=1.0,
         )
+        processors = load_processor_bundle_for_checkpoint(
+            ckpt_path,
+            trainer_probe.config,
+            repo_id=args_cli.repo_id,
+            root=args_cli.root,
+            device=device,
+        )
+        trainer, _, _ = load_trainer_from_checkpoint(
+            ckpt_path,
+            device=device,
+            lr=1e-4,
+            grad_clip_norm=1.0,
+            processors=processors,
+        )
         policy = PushTLerobotPolicyFacade(trainer)
-        norm_path = ckpt_norm_path(ckpt_path)
-        state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=device)
     
     success_count = 0
     total_reward = 0
@@ -158,28 +171,19 @@ def main():
                     
                     state_vec = np.concatenate([current_tcp, tcp_quat, obj_pos, obj_quat, goal_pos, goal_quat])
                     state_tensor = torch.from_numpy(state_vec.astype(np.float32))
-                    if use_remote_policy:
-                        obs_dict = {
-                            WRIST_CAMERA_KEY: wrist_img.cpu(),
-                            TOP_CAMERA_KEY: top_img.cpu(),
-                            "observation.state": state_tensor,
-                        }
-                    else:
-                        state_tensor = state_tensor.to(device)
-                        state_tensor = normalize_state(state_tensor, state_mean, state_std)
-                        obs_dict = {
-                            WRIST_CAMERA_KEY: wrist_img,
-                            TOP_CAMERA_KEY: top_img,
-                            "observation.state": state_tensor,
-                        }
+                    obs_dict = {
+                        WRIST_CAMERA_KEY: wrist_img if not use_remote_policy else wrist_img.cpu(),
+                        TOP_CAMERA_KEY: top_img if not use_remote_policy else top_img.cpu(),
+                        "observation.state": state_tensor if not use_remote_policy else state_tensor,
+                    }
+                    if not use_remote_policy:
+                        obs_dict = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in obs_dict.items()}
 
-                    # 4. 模型推理（远端已返回反归一化 flat 动作）
+                    # 4. 模型推理（本地 policy.act 已含反归一化；远端服务同样返回物理动作）
                     flat_action_seq = policy.act(obs_dict)
 
                     # 5. 执行一段动作序列 (Chunking Policy)
                     action_seq = flat_action_seq.view(args_cli.horizon, action_dim_per_step)
-                    if not use_remote_policy:
-                        action_seq = denormalize_action(action_seq, action_mean, action_std)
                     if action_seq.shape[-1] != action_dim_per_step:
                         raise ValueError(
                             f"[Eval] 模型输出动作维度异常: got={action_seq.shape[-1]}, expected={action_dim_per_step}"
