@@ -28,9 +28,9 @@ python -m pip install -e source/isaac_pusht
 3. 安装 lerobot
 
 ```bash
-wget -O lerobot.zip https://codeload.github.com/huggingface/lerobot/zip/refs/tags/v0.5.1
+wget -O lerobot.zip https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.4.zip
 unzip lerobot.zip
-mv lerobot-0.5.1 lerobot
+mv lerobot-0.4.4 lerobot
 rm lerobot.zip
 cd lerobot
 pip install -e .
