@@ -54,7 +54,7 @@ python scripts/record_lerobot.py --task Isaac-Pusht-v0 --num_episodes 200 --enab
 - isaaclab 回放
 
 ```bash
-python scripts/record_lerobot_replay.py ----repo_id isaac_pusht --root data/isaac_pusht --episode_idx 0 --enable_cameras
+python scripts/record_lerobot_replay.py --repo_id isaac_pusht --root data/isaac_pusht --episode_idx 0 --enable_cameras
 ```
 
 - lerobot viz
