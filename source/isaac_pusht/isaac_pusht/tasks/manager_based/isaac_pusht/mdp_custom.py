@@ -120,7 +120,7 @@ def quat_to_zrot(quats: torch.Tensor) -> torch.Tensor:
     
     return rot_mats
 
-def success_termination(env: ManagerBasedRLEnv, tee_cfg: SceneEntityCfg, goal_cfg: SceneEntityCfg, intersection_thresh: float = 0.90) -> torch.Tensor:
+def success_termination(env: ManagerBasedRLEnv, tee_cfg: SceneEntityCfg, goal_cfg: SceneEntityCfg, intersection_thresh: float = 0.95) -> torch.Tensor:
     device = env.device
     b = env.num_envs
 

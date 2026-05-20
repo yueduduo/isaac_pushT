@@ -1,0 +1,38 @@
+{
+  "train": {
+    "repo_id": "isaac_pusht",
+    "root": "data/isaac_pusht",
+    "注释": "1000 * 1469 = 1469000 训练1000个epoch",
+    "train_steps": 1469000,
+    "batch_size": 32,
+    "lr": 0.0001,
+    "num_workers": 12,
+    "on_demand_dataset": true,
+    "io_workers": 8,
+    "device": "cuda",
+    "save_dir": "checkpoints",
+    "horizon": 32,
+    "diffusion_steps": 100,
+    "n_obs_steps": 1,
+    "n_action_steps": null,
+    "freeze_resnet": false,
+    "freeze_steps": 0,
+    "grad_clip_norm": 1.0,
+    "optimizer_weight_decay": null,
+    "tensorboard": true,
+    "tb_logdir": "runs",
+    "tb_run_name": null,
+    "action_mse": false,
+    "action_mse_batches": 1,
+    "random_window_split": false,
+    "val_split": true,
+    "train_ratio": 0.95,
+    "split_seed": 42
+  },
+  "diffusion_trainer": {
+    "beta_start": 0.0001,
+    "beta_end": 0.02,
+    "weight_decay": 0.0001
+  },
+  "lerobot_diffusion": {}
+}

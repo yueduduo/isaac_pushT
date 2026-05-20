@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git rev-list:*)",
+      "Bash(git cat-file:*)",
+      "Bash(sort -k3 -rn)",
+      "Bash(du -sh .git/*/)",
+      "Bash(git lfs:*)",
+      "Bash(xargs du:*)"
+    ]
+  }
+}
