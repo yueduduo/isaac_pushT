@@ -1,184 +1,95 @@
-# Isaac-Pusht-v0 
+# Isaac-Pusht-v0 & Diffusion Policy
 
-## Overview
+## 概述
 
-This repository contains the code for the Isaac-Pusht-v0 task.
+本仓库提供了IsaacLab PushT环境代码 `Isaac-Pusht-v0`, 并提供完整Diffusion Policy 数据采集、回放以及策略训练、推理管线，效果[参见](https://www.bilibili.com/video/BV1t2L26HEN5/)。
+
 <div style="display: flex; justify-content: center;">
   <img src="source/isaac_pusht/docs/display.png" alt="Isaac-Pusht-v0" width="400">
 </div>
 
-## Installation
 
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
-  We recommend using the conda or uv installation as it simplifies calling Python scripts from the terminal.
+## 快速开始
 
-- Clone or copy this project/repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
+### 安装
 
-- Using a python interpreter that has Isaac Lab installed, install the library in editable mode using:
+1. 安装 Isaac Lab
 
-    ```bash
-    # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/isaac_pusht
-    ```
+[installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html)
 
-- Verify that the extension is correctly installed by:
+2. 安装本仓库
 
-    - Listing the available tasks:
+```bash
+git clone https://github.com/yueduduo/isaac_pushT.git
+cd isaac_pushT
+python -m pip install -e source/isaac_pusht
+```
 
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
-        (in the `scripts/list_envs.py` file) so that it can be listed.
+3. 安装 lerobot
 
-        ```bash
-        python scripts/list_envs.py
-        ```
+```bash
+wget -O lerobot.zip https://codeload.github.com/huggingface/lerobot/zip/refs/tags/v0.5.1
+unzip lerobot.zip
+mv lerobot-0.5.1 lerobot
+rm lerobot.zip
+cd lerobot
+pip install -e .
+```
 
-    - Running with keyboard teleoperation:
+### 数据收集与回放
 
-        ```bash
-        python scripts/teleop_se3_agent.py --task Isaac-Pusht-v0 
-        ```
-
-    - Running a task with dummy agents:
-
-        These include dummy agents that output zero or random agents. They are useful to ensure that the environments are configured correctly.
-
-        - Zero-action agent
-
-            ```bash
-            python scripts/zero_agent.py --task=Isaac-Pusht-v0 
-            ```
-        - Random-action agent
-
-            ```bash
-            python scripts/random_agent.py --task=Isaac-Pusht-v0 
-            ```
-
-## Data Collection and Visualization
-
-This project supports data collection and visualization using the LeRobot v3.0 format.
-
-### 1. Data Collection
-
-Run the following command to start collecting data (including camera observations):
+1. 手动采集
 
 ```bash
 python scripts/record_lerobot.py --task Isaac-Pusht-v0 --num_episodes 200 --enable_cameras
 ```
 
-### 2. Data Visualization
+- 采集的数据默认保存在`项目根目录/data/isaac_pusht`目录。
+- 请注意：采集的数据质量严重影响Diffusion Policy的训练效果。
 
-After collection is complete, you can use the `lerobot` visualization tool to view the data:
+另：目前已有的数据(质量尚可)，参见[地址](https://www.modelscope.cn/datasets/yueduduo/isaac_pusht)
+
+2. 数据回放
+
+- isaaclab 回放
+
+```bash
+python scripts/record_lerobot_replay.py ----repo_id isaac_pusht --root data/isaac_pusht --episode_idx 0 --enable_cameras
+```
+
+- lerobot viz
 
 ```bash
 python -m lerobot.scripts.lerobot_dataset_viz --repo-id isaac_pusht --root data/isaac_pusht --episode-index 0
 ```
 
-## Policy Training (LeRobot Diffusion)
-
-Training uses **`lerobot.policies.diffusion.DiffusionPolicy`** (1D conditional U-Net, SpatialSoftmax vision, `diffusers` DDPM schedule). There is **no** local `algo/` package; old Transformer+flatten checkpoints are **not** compatible.
-
-Training budget is **`--train-steps`** (number of `optimizer.step` calls). `horizon` must be divisible by `2 ** len(down_dims)` (default down_dims length 3 → multiple of 8).
-
-```bash
-python scripts/train.py --repo-id isaac_pusht --root data/isaac_pusht --horizon 32 --train-steps 5000 --batch-size 32 --device cuda
-```
-
-### JSON config (`scripts/configs`)
-
-- Example: [`scripts/configs/train_default.json`](scripts/configs/train_default.json)
-- Loader: `utils/train_config.py`
-- Sections: **`train`**, **`diffusion_trainer`** (maps into `DiffusionConfig` where keys match), optional **`lerobot_diffusion`** for further overrides.
+### Diffusion Policy 训练
 
 ```bash
 python scripts/train.py --config scripts/configs/train_default.json
 ```
+默认仅保存best和last权重, 路径位于`项目根目录/checkpoints`
 
-### Freeze RGB backbone (optional)
-
-```bash
-python scripts/train.py --horizon 32 --freeze-resnet --freeze-steps 500
-```
-
-### Resume (`--resume`)
-
-Checkpoints are **`lerobot_diffusion`** format (`policy_type` + pickled `DiffusionConfig` + weights). Old `best_diffusion.pt` from the removed custom algo cannot be loaded.
-
-```bash
-python scripts/train.py --config scripts/configs/train_default.json --resume checkpoints/last_diffusion.pt --train-steps 2000
-```
-
-Sidecar `*.norm.json` behavior is unchanged.
-
-## Policy Evaluation
-
-`scripts/eval.py` expects the repository root on `PYTHONPATH` (same as `scripts/train.py`).
-
-```bash
-python scripts/eval.py --ckpt checkpoints/best_diffusion.pt --repo-id isaac_pusht --root data/isaac_pusht --horizon 32 --device cuda
-```
-
-`--horizon` must match the checkpoint training horizon.
-
-### Isaac Lab simulation (`eval_model.py`, `record_model_replay.py`)
-
-These scripts load the trained diffusion policy and step the **Isaac** task (not the offline dataloader in `eval.py`).
-
-- **`scripts/eval_model.py`** — roll out `Isaac-Pusht-v0` with the policy for multiple episodes (uses `AppLauncher`; run with the same Isaac Lab Python you use for training data collection).
-- **`scripts/record_model_replay.py`** — replay a single dataset episode: feed dataset images + `observation.state` into the policy and step the sim (see the script docstring for consistency caveats).
-
-By default both load **`--checkpoint`** and `*.norm.json` on the **same machine** as the simulator.
-
-### Remote policy over WebSocket (save VRAM)
-
-If Isaac Sim and the diffusion model do not fit in one GPU, run **inference in a separate process** (or on another host with a GPU) and keep only the simulator on the Isaac machine.
-
-**Implementation** lives under [`utils/remote_policy/`](utils/remote_policy/): msgpack + NumPy wire format (same idea as `pi0_fast_deploy` / `websocket_policy_server.py`), async server + sync client.
-
-1. **Inference server** (no Isaac; needs PyTorch + project `utils` + `lerobot` on `PYTHONPATH`):
-
-   ```bash
-   python scripts/serve_push_diffusion_ws.py --checkpoint checkpoints/best_diffusion.pt --horizon 32 --device cuda:0 --host 0.0.0.0 --port 8765
-   ```
-
-   Requires the sidecar **`checkpoints/best_diffusion.norm.json`** (or whatever matches your checkpoint path). `--horizon` must match training / the client scripts.
-
-2. **Simulator client** — point **`--policy-host`** at the server IP and set **`--policy-port`** (default `8765`):
-
-   ```bash
-   python scripts/eval_model.py --task Isaac-Pusht-v0 --policy-host 192.168.1.10 --policy-port 8765 --horizon 32 ...
-   python scripts/record_model_replay.py --policy-host 192.168.1.10 --policy-port 8765 --horizon 32 ...
-   ```
-
-   When `--policy-host` is set, the client does **not** load local weights; observations are sent as raw images + 21-D state, and the server returns a **denormalized** flat action vector `(horizon * 8,)`.
-
-**Dependencies** for the server/client path: `websockets`, `msgpack` (install in the environment that runs `serve_push_diffusion_ws.py` and in the Isaac env if not already present).
-
-**Health check:** `GET http://<host>:<port>/healthz` → `OK` (handled by the WebSocket server process).
-
-## TensorBoard Visualization
-
-### 1. Training Curves
-
-TensorBoard is enabled by default for `scripts/train.py`. To turn it off or set a run name:
-
-```bash
-python scripts/train.py --horizon 32 --tb-logdir runs --tb-run-name lerobot_dp_h32_exp1
-python scripts/train.py --no-tensorboard
-```
-
-### 2. Evaluation Metrics
-
-Log evaluation metric (`eval/action_mse`) to TensorBoard:
-
-```bash
-python scripts/eval.py --algo diffusion --ckpt checkpoints/best_diffusion.pt --horizon 16 --tensorboard --tb-logdir runs --tb-run-name diffusion_h16_exp1 --tb-step 50
-```
-
-### 3. Start TensorBoard
-
+训练时可以使用 `tensorboard` 查看训练信息 
 ```bash
 tensorboard --logdir runs
 ```
+另：目前已有的权重(质量尚可)，参见[地址](https://www.modelscope.cn/models/yueduduo/isaac_pusht_lerobot_dp/files)
 
-Then open [http://localhost:6006](http://localhost:6006).
+
+### 策略推理
+1. **Inference server** (no Isaac; needs PyTorch + project `utils` + `lerobot` on `PYTHONPATH`):
+```bash
+python scripts/serve_push_diffusion_ws.py --checkpoint checkpoints/best_diffusion.pt --horizon 32 --device cuda:0 --host 0.0.0.0 --port 8765
+```
+
+2. **Simulator client** — point **`--policy-host`** at the server IP and set **`--policy-port`** (default `8765`):
+
+```bash
+pip install websockets msgpack
+
+python scripts/eval_model.py --task Isaac-Pusht-v0 --policy-host localhost --policy-port 8765 --horizon 32 --enable_cameras --debug-draw
+```
+
+
 
