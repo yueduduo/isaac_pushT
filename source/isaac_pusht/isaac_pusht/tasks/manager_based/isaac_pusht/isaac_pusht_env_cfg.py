@@ -52,19 +52,19 @@ WORKSPACE_POS = (0.5, 0.0, -0.0015)
 
 # 机器人推杆 (Push Stick) 参数
 STICK_RADIUS = 0.005
-STICK_HEIGHT = 0.25
-STICK_OFFSET_Z = 0.10  # 相对于 panda_hand 的局部偏移
-TCP_BALL_RADIUS = 0.007
-TCP_BALL_OFFSET_Z = 0.125  # 相对于 stick_geometry 的局部偏移
-# 控制中心 (TCP) 偏移量：STICK_OFFSET_Z + TCP_BALL_OFFSET_Z
-TCP_OFFSET_Z = 0.225 
+STICK_HEIGHT = 0.30
+STICK_OFFSET_Z = 0.18  # 相对于 panda_hand 的局部偏移
+TCP_BALL_RADIUS = 0.005
+TCP_BALL_OFFSET_Z = STICK_HEIGHT / 2  # 相对于 stick_geometry 的局部偏移
+# 控制中心 (TCP) 偏移量：
+TCP_OFFSET_Z = STICK_OFFSET_Z + TCP_BALL_OFFSET_Z
 
 # 任务物体 (T-Block)
 T_BLOCK_POS = (0.5, 0, 0.05)
 
-T_BLOCK_RANDOM_X = (-0.05, 0.05)
-T_BLOCK_RANDOM_Y = (-0.05, 0.05)
-T_BLOCK_RANDOM_YAW = math.pi / 4
+T_BLOCK_RANDOM_X = (-0.02, 0.02)
+T_BLOCK_RANDOM_Y = (-0.02, 0.02)
+T_BLOCK_RANDOM_YAW = math.pi / 8
 
 # 目标区域 (Goal Tee)
 GOAL_TEE_POS = (0.5, 0, -0.001)
@@ -92,7 +92,13 @@ FRONT_WRIST_CAMERA_ROT = math_utils.quat_from_euler_xyz(
                 torch.tensor([CAMERA_YAW_DEG * math.pi / 180.0])
             )[0].tolist()
 
-BACK_WRIST_CAMERA_POS = (-0.05, 0.0, 0)
+# 场景固定顶视相机
+TOP_CAMERA_POS = (0.85705, 0.0, 0.58672)
+TOP_CAMERA_ROT = math_utils.quat_from_euler_xyz(
+    torch.tensor([37 * math.pi / 180.0]), # 对应面板中的Y
+    torch.tensor([0]),                    # 对应面板中的X
+    torch.tensor([90 * math.pi / 180.0]), # 对应面板中的Z + opengl 约定 == 可以快速的写相机
+)[0].tolist()
 
 ##
 # Scene definition
@@ -166,6 +172,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/TBlock",
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{BASE_DIR}/assets/t_block.usd",
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=T_BLOCK_POS),
     )
@@ -202,7 +209,7 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
     front_wrirst_camera_visual = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/front_wrirst_camera_visual",
         spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.04, 0.04),
+            size=(0.08, 0.02, 0.02),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
@@ -212,11 +219,12 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    back_wrirst_camera = TiledCameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/back_wrirst_camera",
+    top_camera = TiledCameraCfg(
+        prim_path="{ENV_REGEX_NS}/top_camera",
         offset=TiledCameraCfg.OffsetCfg(
-            pos=BACK_WRIST_CAMERA_POS, 
-            rot=FRONT_WRIST_CAMERA_ROT
+            pos=TOP_CAMERA_POS,
+            rot=TOP_CAMERA_ROT,
+            convention="opengl",
         ),
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, vertical_aperture=15.2908, clipping_range=(0.1, 1.0e5)
@@ -227,16 +235,16 @@ class IsaacPushtSceneCfg(InteractiveSceneCfg):
         update_period=0,
     )
 
-    back_wrirst_camera_visual = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/back_wrirst_camera_visual",
+    top_camera_visual = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/top_camera_visual",
         spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.04, 0.04),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+            size=(0.08, 0.02, 0.02),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.4, 1.0)),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=BACK_WRIST_CAMERA_POS, 
-            rot=FRONT_WRIST_CAMERA_ROT
+            pos=TOP_CAMERA_POS,
+            rot=TOP_CAMERA_ROT,
         ),
     )
 

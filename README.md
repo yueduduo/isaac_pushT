@@ -119,6 +119,42 @@ python scripts/eval.py --ckpt checkpoints/best_diffusion.pt --repo-id isaac_push
 
 `--horizon` must match the checkpoint training horizon.
 
+### Isaac Lab simulation (`eval_model.py`, `record_model_replay.py`)
+
+These scripts load the trained diffusion policy and step the **Isaac** task (not the offline dataloader in `eval.py`).
+
+- **`scripts/eval_model.py`** — roll out `Isaac-Pusht-v0` with the policy for multiple episodes (uses `AppLauncher`; run with the same Isaac Lab Python you use for training data collection).
+- **`scripts/record_model_replay.py`** — replay a single dataset episode: feed dataset images + `observation.state` into the policy and step the sim (see the script docstring for consistency caveats).
+
+By default both load **`--checkpoint`** and `*.norm.json` on the **same machine** as the simulator.
+
+### Remote policy over WebSocket (save VRAM)
+
+If Isaac Sim and the diffusion model do not fit in one GPU, run **inference in a separate process** (or on another host with a GPU) and keep only the simulator on the Isaac machine.
+
+**Implementation** lives under [`utils/remote_policy/`](utils/remote_policy/): msgpack + NumPy wire format (same idea as `pi0_fast_deploy` / `websocket_policy_server.py`), async server + sync client.
+
+1. **Inference server** (no Isaac; needs PyTorch + project `utils` + `lerobot` on `PYTHONPATH`):
+
+   ```bash
+   python scripts/serve_push_diffusion_ws.py --checkpoint checkpoints/best_diffusion.pt --horizon 32 --device cuda:0 --host 0.0.0.0 --port 8765
+   ```
+
+   Requires the sidecar **`checkpoints/best_diffusion.norm.json`** (or whatever matches your checkpoint path). `--horizon` must match training / the client scripts.
+
+2. **Simulator client** — point **`--policy-host`** at the server IP and set **`--policy-port`** (default `8765`):
+
+   ```bash
+   python scripts/eval_model.py --task Isaac-Pusht-v0 --policy-host 192.168.1.10 --policy-port 8765 --horizon 32 ...
+   python scripts/record_model_replay.py --policy-host 192.168.1.10 --policy-port 8765 --horizon 32 ...
+   ```
+
+   When `--policy-host` is set, the client does **not** load local weights; observations are sent as raw images + 21-D state, and the server returns a **denormalized** flat action vector `(horizon * 8,)`.
+
+**Dependencies** for the server/client path: `websockets`, `msgpack` (install in the environment that runs `serve_push_diffusion_ws.py` and in the Isaac env if not already present).
+
+**Health check:** `GET http://<host>:<port>/healthz` → `OK` (handled by the WebSocket server process).
+
 ## TensorBoard Visualization
 
 ### 1. Training Curves

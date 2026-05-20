@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import asdict
 import pickle
 import sys
 from pathlib import Path
@@ -29,10 +30,10 @@ from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
-from utils.dataset import BACK_KEY, FRONT_KEY, STATE_KEY
+from utils.dataset import STATE_KEY, TOP_CAMERA_KEY, WRIST_CAMERA_KEY
 
 # 与 build_push_diffusion_config 中 input_features 的 VISUAL 键顺序一致
-IMAGE_KEYS: tuple[str, ...] = (FRONT_KEY, BACK_KEY)
+IMAGE_KEYS: tuple[str, ...] = (WRIST_CAMERA_KEY, TOP_CAMERA_KEY)
 
 
 def ensure_lerobot_on_path(project_root: Path | None = None) -> Path:
@@ -74,8 +75,8 @@ def build_push_diffusion_config(
         n_action_steps=n_action_steps,
         input_features={
             STATE_KEY: PolicyFeature(type=FeatureType.STATE, shape=(state_dim,)),
-            FRONT_KEY: PolicyFeature(type=FeatureType.VISUAL, shape=(c, h, w)),
-            BACK_KEY: PolicyFeature(type=FeatureType.VISUAL, shape=(c, h, w)),
+            WRIST_CAMERA_KEY: PolicyFeature(type=FeatureType.VISUAL, shape=(c, h, w)),
+            TOP_CAMERA_KEY: PolicyFeature(type=FeatureType.VISUAL, shape=(c, h, w)),
         },
         output_features={
             ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(action_dim_per_step,)),
@@ -243,7 +244,8 @@ class PushTLerobotTrainer:
         self.policy.eval()
         if num_inference_steps is not None:
             self.policy.diffusion.num_inference_steps = int(num_inference_steps)
-        gb = _obs_batch_for_generate(self.policy, obs)
+        obs_dev = {k: v.to(self.device) for k, v in obs.items()}
+        gb = _obs_batch_for_generate(self.policy, obs_dev)
         pred = self.policy.diffusion.generate_actions(gb, noise=None)
         bsz = pred.shape[0]
         return pred.reshape(bsz, -1)
@@ -270,6 +272,7 @@ def save_checkpoint(
         "policy_type": "lerobot_diffusion",
         **trainer.state_dict(),
     }
+    payload["config_dict"] = asdict(pickle.loads(payload["config_pickle"]))
     torch.save(payload, path)
 
 
@@ -283,7 +286,7 @@ def load_trainer_from_checkpoint(
     ckpt = torch.load(path, map_location=device)
     if ckpt.get("policy_type") != "lerobot_diffusion":
         raise ValueError(
-            "该 checkpoint 不是 lerobot_diffusion 格式；旧版自研 algo 权重无法加载到新管线。"
+            "该 checkpoint 不是 lerobot_diffusion 格式；"
         )
     cfg = pickle.loads(ckpt["config_pickle"])
     if not isinstance(cfg, DiffusionConfig):

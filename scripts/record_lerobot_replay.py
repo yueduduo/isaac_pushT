@@ -88,6 +88,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
+from utils.dataset import TOP_CAMERA_KEY, WRIST_CAMERA_KEY
 from utils.tcp_trajectory_viz import visualize_tcp_chunk_trajectory
 
 try:
@@ -234,7 +235,7 @@ def show_cameras(frame: dict) -> bool:
     数据集中图像格式：Tensor (C, H, W)，值域 [0, 1]，RGB。
     """
     imgs_bgr = []
-    for key in ("observation.front_wrist_camera_image", "observation.back_wrist_camera_image"):
+    for key in (WRIST_CAMERA_KEY, TOP_CAMERA_KEY):
         img = frame[key].detach().cpu().numpy()          # (C, H, W)，[0,1]
         img_u8 = (img * 255.0).astype(np.uint8)
         img_hwc = np.transpose(img_u8, (1, 2, 0))       # → (H, W, C) RGB

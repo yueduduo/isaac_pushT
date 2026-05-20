@@ -185,7 +185,7 @@ def main() -> None:
 
     state_dim = int(actual_ds.all_states.shape[-1])
     action_dim_per_step = int(actual_ds.all_actions.shape[-1])
-    chw = tuple(int(x) for x in actual_ds.all_front_images.shape[1:4])
+    chw = tuple(int(x) for x in actual_ds.all_wrist_camera_images.shape[1:4])
 
     resume_path: Path | None = None
     if args.resume:

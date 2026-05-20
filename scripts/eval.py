@@ -65,6 +65,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         train_ratio=0.95,
+        device=device,
         val_split=True,
     )
 

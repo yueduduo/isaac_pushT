@@ -47,6 +47,10 @@ import isaac_pusht.tasks  # noqa: F401
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import combine_feature_dicts
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(_PROJECT_ROOT))
+from utils.dataset import TOP_CAMERA_KEY, WRIST_CAMERA_KEY
 
 # ==========================================
 # 0. 全局配置 (Constants & Dataset Format)
@@ -78,12 +82,12 @@ OBS_FEATURES = {
         "dtype": "float32",
         "shape": (STATE_DIM,),
     },
-    "observation.front_wrist_camera_image": {
+    WRIST_CAMERA_KEY: {
         "dtype": "image",
         "shape": (3, RENDER_HEIGHT, RENDER_WIDTH),
         "names": ["color"],
     },
-    "observation.back_wrist_camera_image": {
+    TOP_CAMERA_KEY: {
         "dtype": "image",
         "shape": (3, RENDER_HEIGHT, RENDER_WIDTH),
         "names": ["color"],
@@ -448,20 +452,20 @@ def main():
 
                 # 2. step 前：采集 state / 图像（与 observation.state 时刻一致）
                 recording_capture_ok = False
-                front_img_uint8 = None
-                back_img_uint8 = None
+                wrist_img_uint8 = None
+                top_img_uint8 = None
                 state_pre = None
                 if teleop.is_recording:
                     try:
-                        front_rgb_image = env.scene["front_wrirst_camera"].data.output["rgb"][
+                        wrist_rgb_image = env.scene["front_wrirst_camera"].data.output["rgb"][
                             0
                         ].cpu().numpy()
-                        front_img_uint8 = np.moveaxis(front_rgb_image, -1, 0).astype(np.uint8)
+                        wrist_img_uint8 = np.moveaxis(wrist_rgb_image, -1, 0).astype(np.uint8)
 
-                        back_rgb_image = env.scene["back_wrirst_camera"].data.output["rgb"][
+                        top_rgb_image = env.scene["top_camera"].data.output["rgb"][
                             0
                         ].cpu().numpy()
-                        back_img_uint8 = np.moveaxis(back_rgb_image, -1, 0).astype(np.uint8)
+                        top_img_uint8 = np.moveaxis(top_rgb_image, -1, 0).astype(np.uint8)
 
                         state_pre = pack_rl_state_vector(env)
                         recording_capture_ok = True
@@ -489,8 +493,8 @@ def main():
                         )
                         episode_buffer.append(
                             {
-                                "observation.front_wrist_camera_image": front_img_uint8,
-                                "observation.back_wrist_camera_image": back_img_uint8,
+                                WRIST_CAMERA_KEY: wrist_img_uint8,
+                                TOP_CAMERA_KEY: top_img_uint8,
                                 "observation.state": state_pre,
                                 "observation.next_state": next_state,
                                 "reward": np.array([reward_f], dtype=np.float32),

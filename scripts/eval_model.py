@@ -24,10 +24,24 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Evaluate a trained PushT model.")
 parser.add_argument("--task", type=str, default="Isaac-Pusht-v0", help="Gym task name")
 parser.add_argument("--checkpoint", type=str, default="checkpoints/best_diffusion.pt", help="Path to model checkpoint")
+parser.add_argument(
+    "--policy-host",
+    type=str,
+    default=None,
+    help="若设置，则不加载本地权重，改为连接该地址的 WebSocket 策略服务（省显存）。",
+)
+parser.add_argument(
+    "--policy-port",
+    type=int,
+    default=8765,
+    help="与 scripts/serve_push_diffusion_ws.py 的 --port 一致。",
+)
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate")
 parser.add_argument("--max_steps", type=int, default=400, help="Max steps per episode (timeout)")
 parser.add_argument("--horizon", type=int, default=32, help="Temporal horizon used during training")
-parser.add_argument("--action-steps", type=int, default=16, help="Number of action steps to execute per inference")
+parser.add_argument("--action-steps", type=int, default=32, help="Number of action steps to execute per inference")
+parser.add_argument("--debug-draw", action="store_true", help="Enable debug draw for visualizing TCP future positions")
+
 
 # 增加 AppLauncher 的参数并解析
 AppLauncher.add_app_launcher_args(parser)
@@ -45,8 +59,10 @@ import isaaclab_tasks  # noqa: F401
 import isaac_pusht.tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
+from utils.dataset import TOP_CAMERA_KEY, WRIST_CAMERA_KEY
 from utils.lerobot_push_diffusion import PushTLerobotPolicyFacade, load_trainer_from_checkpoint
 from utils.normalization import ckpt_norm_path, denormalize_action, load_norm_stats, normalize_state
+from utils.remote_policy import RemotePushDiffusionPolicy
 from utils.tcp_trajectory_viz import visualize_tcp_chunk_trajectory
 
 
@@ -67,30 +83,42 @@ def main():
     # Debug draw interface for visualizing TCP future positions
     try:
         from isaacsim.util.debug_draw import _debug_draw
-
-        debug_draw = _debug_draw.acquire_debug_draw_interface()
+        if args_cli.debug_draw:
+            debug_draw = _debug_draw.acquire_debug_draw_interface()
+        else:
+            debug_draw = None
     except Exception:
         debug_draw = None
     
     # 2. 初始化 Policy（horizon * 8：单步动作为绝对 TCP 位姿 + gripper）
     action_dim_per_step = 8
 
-    ckpt_path = Path(args_cli.checkpoint)
-    if not ckpt_path.exists():
-        print(f"Error: Checkpoint not found at {ckpt_path}")
-        simulation_app.close()
-        return
+    use_remote_policy = args_cli.policy_host is not None
+    if use_remote_policy:
+        policy = RemotePushDiffusionPolicy(
+            args_cli.policy_host,
+            args_cli.policy_port,
+            out_device=device,
+        )
+        print(f"Remote policy server metadata: {policy.server_metadata}")
+        state_mean = state_std = action_mean = action_std = None
+    else:
+        ckpt_path = Path(args_cli.checkpoint)
+        if not ckpt_path.exists():
+            print(f"Error: Checkpoint not found at {ckpt_path}")
+            simulation_app.close()
+            return
 
-    print(f"Loading checkpoint: {ckpt_path}")
-    trainer, _, _ = load_trainer_from_checkpoint(
-        ckpt_path,
-        device=device,
-        lr=1e-4,
-        grad_clip_norm=1.0,
-    )
-    policy = PushTLerobotPolicyFacade(trainer)
-    norm_path = ckpt_norm_path(ckpt_path)
-    state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=device)
+        print(f"Loading checkpoint: {ckpt_path}")
+        trainer, _, _ = load_trainer_from_checkpoint(
+            ckpt_path,
+            device=device,
+            lr=1e-4,
+            grad_clip_norm=1.0,
+        )
+        policy = PushTLerobotPolicyFacade(trainer)
+        norm_path = ckpt_norm_path(ckpt_path)
+        state_mean, state_std, action_mean, action_std = load_norm_stats(norm_path, device=device)
     
     success_count = 0
     total_reward = 0
@@ -114,11 +142,11 @@ def main():
                     # 3. 提取当前观测值 (必须与 record_lerobot.py 逻辑完全一致)
                     
                     # 提取相机图像
-                    front_rgb = env.scene["front_wrirst_camera"].data.output["rgb"][0].cpu().numpy()
-                    front_img = torch.from_numpy(np.moveaxis(front_rgb, -1, 0).astype(np.float32) / 255.0).to(device)
+                    wrist_rgb = env.scene["front_wrirst_camera"].data.output["rgb"][0].cpu().numpy()
+                    wrist_img = torch.from_numpy(np.moveaxis(wrist_rgb, -1, 0).astype(np.float32) / 255.0).to(device)
                     
-                    back_rgb = env.scene["back_wrirst_camera"].data.output["rgb"][0].cpu().numpy()
-                    back_img = torch.from_numpy(np.moveaxis(back_rgb, -1, 0).astype(np.float32) / 255.0).to(device)
+                    top_rgb = env.scene["top_camera"].data.output["rgb"][0].cpu().numpy()
+                    top_img = torch.from_numpy(np.moveaxis(top_rgb, -1, 0).astype(np.float32) / 255.0).to(device)
                     
                     # 提取状态 (TCP + Object + Goal)
                     current_tcp = env.scene["tfs"].data.target_pos_w[0, -1, :].cpu().numpy()
@@ -129,22 +157,29 @@ def main():
                     goal_quat = env.scene["goal_tee"].data.root_quat_w[0].cpu().numpy()
                     
                     state_vec = np.concatenate([current_tcp, tcp_quat, obj_pos, obj_quat, goal_pos, goal_quat])
-                    state_tensor = torch.from_numpy(state_vec.astype(np.float32)).to(device)
-                    state_tensor = normalize_state(state_tensor, state_mean, state_std)
-                    
-                    obs_dict = {
-                        "observation.front_wrist_camera_image": front_img,
-                        "observation.back_wrist_camera_image": back_img,
-                        "observation.state": state_tensor,
-                    }
-                    
-                    # 4. 模型推理
-                    # 返回的是 (horizon * 8) 形状的张量
+                    state_tensor = torch.from_numpy(state_vec.astype(np.float32))
+                    if use_remote_policy:
+                        obs_dict = {
+                            WRIST_CAMERA_KEY: wrist_img.cpu(),
+                            TOP_CAMERA_KEY: top_img.cpu(),
+                            "observation.state": state_tensor,
+                        }
+                    else:
+                        state_tensor = state_tensor.to(device)
+                        state_tensor = normalize_state(state_tensor, state_mean, state_std)
+                        obs_dict = {
+                            WRIST_CAMERA_KEY: wrist_img,
+                            TOP_CAMERA_KEY: top_img,
+                            "observation.state": state_tensor,
+                        }
+
+                    # 4. 模型推理（远端已返回反归一化 flat 动作）
                     flat_action_seq = policy.act(obs_dict)
 
                     # 5. 执行一段动作序列 (Chunking Policy)
                     action_seq = flat_action_seq.view(args_cli.horizon, action_dim_per_step)
-                    action_seq = denormalize_action(action_seq, action_mean, action_std)
+                    if not use_remote_policy:
+                        action_seq = denormalize_action(action_seq, action_mean, action_std)
                     if action_seq.shape[-1] != action_dim_per_step:
                         raise ValueError(
                             f"[Eval] 模型输出动作维度异常: got={action_seq.shape[-1]}, expected={action_dim_per_step}"
@@ -217,6 +252,8 @@ def main():
         print(f"  Success Rate: {success_count / args_cli.num_episodes * 100:.1f}%")
         print(f"  Average Reward: {total_reward / args_cli.num_episodes:.2f}")
         print("-" * 50)
+        if isinstance(policy, RemotePushDiffusionPolicy):
+            policy.close()
         env.close()
         simulation_app.close()
 

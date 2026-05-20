@@ -19,8 +19,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
 
 
-FRONT_KEY = "observation.front_wrist_camera_image"
-BACK_KEY = "observation.back_wrist_camera_image"
+WRIST_CAMERA_KEY = "observation.wrist_camera_image"
+TOP_CAMERA_KEY = "observation.top_camera_image"
 STATE_KEY = "observation.state"
 ACTION_KEY = "action"
 
@@ -29,8 +29,8 @@ ACTION_KEY = "action"
 class DatasetConfig:
     repo_id: str = "isaac_pusht"
     root: str = "data/isaac_pusht"
-    front_key: str = FRONT_KEY
-    back_key: str = BACK_KEY
+    wrist_camera_key: str = WRIST_CAMERA_KEY
+    top_camera_key: str = TOP_CAMERA_KEY
     state_key: str = STATE_KEY
     action_key: str = ACTION_KEY
     horizon: int = 16
@@ -148,12 +148,12 @@ class LeRobotPushTDataset(Dataset):
             return tensor.contiguous().clone() # clone 确保数据在内存中是独立的
 
         # 顺序执行，利用单线程全速顺序 I/O (在 Windows 上通常比多线程并发 I/O 更稳定且跑满带宽)
-        self.all_front_images = process_column(self.cfg.front_key)
-        self.all_back_images = process_column(self.cfg.back_key)
+        self.all_wrist_camera_images = process_column(self.cfg.wrist_camera_key)
+        self.all_top_camera_images = process_column(self.cfg.top_camera_key)
             
         total_time = time.time() - start_time
         # 统计内存 (float32 = 4 bytes per pixel)
-        total_bytes = (self.all_front_images.numel() + self.all_back_images.numel()) * 4
+        total_bytes = (self.all_wrist_camera_images.numel() + self.all_top_camera_images.numel()) * 4
         total_bytes += (self.all_states.numel() + self.all_actions.numel()) * 4
         mem_gb = total_bytes / (1024**3)
         print(f"[Dataset] Preload finished in {total_time:.2f}s. Total RAM for Tensors: {mem_gb:.2f} GB")
@@ -180,8 +180,8 @@ class LeRobotPushTDataset(Dataset):
         dev = self.device
         return {
             "obs": {
-                self.cfg.front_key: self.all_front_images[sample_indices].to(dev),
-                self.cfg.back_key: self.all_back_images[sample_indices].to(dev),
+                self.cfg.wrist_camera_key: self.all_wrist_camera_images[sample_indices].to(dev),
+                self.cfg.top_camera_key: self.all_top_camera_images[sample_indices].to(dev),
                 self.cfg.state_key: state_batch.to(dev),
             },
             "action": action_batch.to(dev),
